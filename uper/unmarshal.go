@@ -71,72 +71,59 @@ func unmarshalBool(r *asn1.BitReader, v reflect.Value) error {
 	return nil
 }
 
+func unmarshalAnyInt(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions, unsigned bool) error {
+	typeName := "int"
+	if unsigned {
+		typeName = "uint"
+	}
+
+	if opts.SizeMin == nil || opts.SizeMax == nil {
+		return &asn1.Error{
+			Op:     "unmarshal",
+			Type:   typeName,
+			Reason: "integer requires size constraint (e.g., size:0..255)",
+		}
+	}
+
+	lowerBound := *opts.SizeMin
+	upperBound := *opts.SizeMax
+
+	// Calculate the number of bits needed for the range
+	rangeSize := upperBound - lowerBound + 1
+	numBits := bitsNeeded(uint64(rangeSize - 1))
+
+	// Read the offset value
+	offset, err := r.ReadBits(numBits)
+	if err != nil {
+		return &asn1.Error{
+			Op:     "unmarshal",
+			Type:   typeName,
+			Reason: fmt.Sprintf("failed to read %d bits: %v", numBits, err),
+		}
+	}
+
+	// Calculate the actual value by adding the minimum
+	if unsigned {
+		value := offset + uint64(lowerBound)
+		v.SetUint(value)
+	} else {
+		value := int64(offset) + lowerBound
+		v.SetInt(value)
+	}
+
+	return nil
+}
+
 // unmarshalInt decodes a constrained integer using UPER encoding.
 // The value is decoded as an offset from the minimum, using the minimum
 // number of bits required to represent the range.
 func unmarshalInt(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) error {
-	if opts.SizeMin == nil || opts.SizeMax == nil {
-		return &asn1.Error{
-			Op:     "unmarshal",
-			Type:   "int",
-			Reason: "integer requires size constraint (e.g., size:0..255)",
-		}
-	}
-
-	lowerBound := *opts.SizeMin
-	upperBound := *opts.SizeMax
-
-	// Calculate the number of bits needed for the range
-	rangeSize := upperBound - lowerBound + 1
-	numBits := bitsNeeded(uint64(rangeSize - 1))
-
-	// Read the offset value
-	offset, err := r.ReadBits(numBits)
-	if err != nil {
-		return &asn1.Error{
-			Op:     "unmarshal",
-			Type:   "int",
-			Reason: fmt.Sprintf("failed to read %d bits: %v", numBits, err),
-		}
-	}
-
-	// Calculate the actual value by adding the minimum
-	value := int64(offset) + lowerBound
-	v.SetInt(value)
-	return nil
+	return unmarshalAnyInt(r, v, opts, false)
 }
 
 // unmarshalUint decodes a constrained unsigned integer using UPER encoding.
 func unmarshalUint(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) error {
-	if opts.SizeMin == nil || opts.SizeMax == nil {
-		return &asn1.Error{
-			Op:     "unmarshal",
-			Type:   "uint",
-			Reason: "integer requires size constraint (e.g., size:0..255)",
-		}
-	}
-
-	lowerBound := *opts.SizeMin
-	upperBound := *opts.SizeMax
-
-	// Calculate the number of bits needed for the range
-	rangeSize := upperBound - lowerBound + 1
-	numBits := bitsNeeded(uint64(rangeSize - 1))
-
-	// Read the offset value
-	offset, err := r.ReadBits(numBits)
-	if err != nil {
-		return &asn1.Error{
-			Op:     "unmarshal",
-			Type:   "uint",
-			Reason: fmt.Sprintf("failed to read %d bits: %v", numBits, err),
-		}
-	}
-
-	// Calculate the actual value by adding the minimum
-	value := offset + uint64(lowerBound)
-	v.SetUint(value)
-	return nil
+	return unmarshalAnyInt(r, v, opts, true)
 }
 
 // unmarshalStruct decodes each exported field of a struct in sequence.
