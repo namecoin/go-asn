@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/shaneshort/go-asn/asn1"
+	"github.com/sofia-nep/go-asn/asn1"
 )
 
 // Marshal encodes a value using UPER (Unaligned Packed Encoding Rules).

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/shaneshort/go-asn/asn1"
+	"github.com/sofia-nep/go-asn/asn1"
 )
 
 // Unmarshal decodes UPER (Unaligned Packed Encoding Rules) data into a value.
