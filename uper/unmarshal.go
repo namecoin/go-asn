@@ -17,11 +17,12 @@ func Unmarshal(data []byte, v interface{}) error {
 	}
 
 	r := asn1.NewBitReader(data, false) // UPER is unaligned
-	return unmarshalValue(r, rv.Elem(), asn1.FieldOptions{})
+	return UnmarshalValue(r, rv.Elem(), asn1.FieldOptions{})
 }
 
-// unmarshalValue decodes a single value based on its type.
-func unmarshalValue(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) error {
+// Namecoin: Public in order to facilitate using an out of band length for SEQUENCE OF.
+// UnmarshalValue decodes a single value based on its type.
+func UnmarshalValue(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) error {
 	// Handle pointers - allocate if nil
 	if v.Kind() == reflect.Ptr {
 		if v.IsNil() {
@@ -216,7 +217,7 @@ func unmarshalStruct(r *asn1.BitReader, v reflect.Value) error {
 			}
 		}
 
-		if err := unmarshalValue(r, field, opts); err != nil {
+		if err := UnmarshalValue(r, field, opts); err != nil {
 			// Wrap the error with field context if not already wrapped
 			var e *asn1.Error
 			if errors.As(err, &e) && e.Field == "" {
@@ -324,7 +325,7 @@ func unmarshalChoice(r *asn1.BitReader, v reflect.Value) error {
 		target = target.Elem()
 	}
 
-	if err := unmarshalValue(r, target, selectedAlt.opts); err != nil {
+	if err := UnmarshalValue(r, target, selectedAlt.opts); err != nil {
 		sf := t.Field(selectedAlt.fieldIndex)
 		var e *asn1.Error
 		if errors.As(err, &e) && e.Field == "" {
@@ -554,7 +555,7 @@ func UnmarshalSequenceOf(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOpti
 		elem := slice.Index(int(i))
 		// Pass empty options for elements - they should have their own constraints
 		// defined by the element type's struct tags
-		if err := unmarshalValue(r, elem, asn1.FieldOptions{}); err != nil {
+		if err := UnmarshalValue(r, elem, asn1.FieldOptions{}); err != nil {
 			return &asn1.Error{
 				Op:     "unmarshal",
 				Type:   elemType.String(),
