@@ -46,7 +46,7 @@ func unmarshalValue(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) 
 		if v.Type().Elem().Kind() == reflect.Uint8 {
 			return unmarshalOctetString(r, v, opts)
 		}
-		return unmarshalSequenceOf(r, v, opts)
+		return UnmarshalSequenceOf(r, v, opts)
 	default:
 		return &asn1.Error{
 			Op:     "unmarshal",
@@ -511,8 +511,9 @@ func unmarshalUTF8String(r *asn1.BitReader, length int) (string, error) {
 	return string(bytes), nil
 }
 
-// unmarshalSequenceOf decodes a slice as an ASN.1 SEQUENCE OF.
-func unmarshalSequenceOf(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) error {
+// Namecoin: Public in order to facilitate using an out of band length.
+// UnmarshalSequenceOf decodes a slice as an ASN.1 SEQUENCE OF.
+func UnmarshalSequenceOf(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) error {
 	if opts.SizeMin == nil || opts.SizeMax == nil {
 		return &asn1.Error{
 			Op:     "unmarshal",
