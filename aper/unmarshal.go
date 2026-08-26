@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/sofia-nep/go-asn/asn1"
+	"github.com/namecoin/go-asn/asn1"
 )
 
 // Unmarshal decodes APER (Aligned Packed Encoding Rules) data into a value.

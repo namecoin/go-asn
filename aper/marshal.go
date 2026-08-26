@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/sofia-nep/go-asn/asn1"
+	"github.com/namecoin/go-asn/asn1"
 )
 
 // Marshal encodes a value using APER (Aligned Packed Encoding Rules).
