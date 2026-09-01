@@ -36,12 +36,12 @@ func Marshal(v interface{}) ([]byte, error) {
 }
 
 func MarshalValue(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOptions) error {
-	_, err := marshalValue(w, v, opts)
+	_, err := marshalValue(w, v, opts, nil)
 	return err
 }
 
 // MarshalValue encodes a single value based on its type.
-func marshalValue(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOptions) (*mixedRadixNumber, error) {
+func marshalValue(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOptions, mixedRadixCtx *[]mixedRadixNumber) (*mixedRadixNumber, error) {
 	// Handle pointers - dereference to get the underlying value.
 	// Optional fields use pointers to indicate presence (non-nil = present).
 	// By the time we reach here, the preamble has already been written and
@@ -63,7 +63,7 @@ func marshalValue(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOptions) (*
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		return marshalInt(int64(v.Uint()), opts)
 	case reflect.Struct:
-		return nil, marshalStruct(w, v)
+		return nil, marshalStruct(w, v, mixedRadixCtx)
 	case reflect.String:
 		return nil, marshalString(w, v.String(), opts)
 	case reflect.Slice:
@@ -97,12 +97,18 @@ func marshalBool(v bool) mixedRadixNumber {
 //
 // If the struct represents a CHOICE (all exported fields have choice:N tags
 // or are pointer types with exactly one non-nil), it is encoded as a CHOICE.
-func marshalStruct(w *asn1.BitWriter, v reflect.Value) error {
+func marshalStruct(w *asn1.BitWriter, v reflect.Value, mixedRadixCtx *[]mixedRadixNumber) error {
 	t := v.Type()
+
+	nestedMixedRadix := true
+	if mixedRadixCtx == nil {
+		nestedMixedRadix = false
+		mixedRadixCtx = &[]mixedRadixNumber{}
+	}
 
 	// Check if this struct represents a CHOICE type
 	if isChoiceStruct(v) {
-		return marshalChoice(w, v)
+		return marshalChoice(w, v, mixedRadixCtx)
 	}
 
 	// First pass: identify optional fields and write the presence preamble.
@@ -144,8 +150,6 @@ func marshalStruct(w *asn1.BitWriter, v reflect.Value) error {
 		}
 	}
 
-	var nums []mixedRadixNumber
-
 	// Second pass: encode field values in order
 	for i := 0; i < v.NumField(); i++ {
 		field := v.Field(i)
@@ -174,7 +178,7 @@ func marshalStruct(w *asn1.BitWriter, v reflect.Value) error {
 		}
 
 		var num *mixedRadixNumber
-		if num, err = marshalValue(w, field, opts); err != nil {
+		if num, err = marshalValue(w, field, opts, mixedRadixCtx); err != nil {
 			// Wrap the error with field context if not already wrapped
 			var e *asn1.Error
 			if errors.As(err, &e) && e.Field == "" {
@@ -184,11 +188,13 @@ func marshalStruct(w *asn1.BitWriter, v reflect.Value) error {
 		}
 
 		if num != nil {
-			nums = append(nums, *num)
+			*mixedRadixCtx = append(*mixedRadixCtx, *num)
 		}
 	}
 
-	if nums == nil {
+	nums := *mixedRadixCtx
+
+	if nestedMixedRadix || len(nums) == 0 {
 		return nil
 	}
 
@@ -282,7 +288,7 @@ func isChoiceStruct(v reflect.Value) bool {
 // marshalChoice encodes a CHOICE type.
 // The choice index is encoded first (using the minimum bits for the number of alternatives),
 // followed by the chosen value.
-func marshalChoice(w *asn1.BitWriter, v reflect.Value) error {
+func marshalChoice(w *asn1.BitWriter, v reflect.Value, mixedRadixCtx *[]mixedRadixNumber) error {
 	t := v.Type()
 
 	// Build a map of choice index to field index, and find the selected alternative
@@ -375,7 +381,7 @@ func marshalChoice(w *asn1.BitWriter, v reflect.Value) error {
 		field = field.Elem()
 	}
 
-	if err := MarshalValue(w, field, opts); err != nil {
+	if _, err := marshalValue(w, field, opts, mixedRadixCtx); err != nil {
 		var e *asn1.Error
 		if errors.As(err, &e) && e.Field == "" {
 			e.Field = sf.Name

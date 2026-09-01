@@ -26,6 +26,10 @@ func Unmarshal(data []byte, v interface{}) error {
 }
 
 func UnmarshalValue(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) error {
+	return unmarshalValue(r, v, opts, nil)
+}
+
+func unmarshalValue(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions, mixedRadixCtx *[]mixedRadixMeta) error {
 	// Handle pointers - allocate if nil
 	if v.Kind() == reflect.Ptr {
 		if v.IsNil() {
@@ -42,7 +46,7 @@ func UnmarshalValue(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) 
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		return unmarshalUint(r, v, opts)
 	case reflect.Struct:
-		return unmarshalStruct(r, v)
+		return unmarshalStruct(r, v, mixedRadixCtx)
 	case reflect.String:
 		return unmarshalString(r, v, opts)
 	case reflect.Slice:
@@ -133,12 +137,18 @@ func unmarshalUint(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) e
 // unmarshalStruct decodes each exported field of a struct in sequence.
 // For UPER, optional fields are decoded with a presence bitmap (preamble)
 // that precedes all field values.
-func unmarshalStruct(r *asn1.BitReader, v reflect.Value) error {
+func unmarshalStruct(r *asn1.BitReader, v reflect.Value, mixedRadixCtx *[]mixedRadixMeta) error {
 	t := v.Type()
+
+	nestedMixedRadix := true
+	if mixedRadixCtx == nil {
+		nestedMixedRadix = false
+		mixedRadixCtx = &[]mixedRadixMeta{}
+	}
 
 	// Check if this struct represents a CHOICE type
 	if isChoiceStruct(v) {
-		return unmarshalChoice(r, v)
+		return unmarshalChoice(r, v, mixedRadixCtx)
 	}
 
 	// First pass: identify optional fields and read the presence preamble.
@@ -188,8 +198,6 @@ func unmarshalStruct(r *asn1.BitReader, v reflect.Value) error {
 	for _, of := range optionalFields {
 		optionalPresence[of.index] = of.present
 	}
-
-	mixedRadix := []mixedRadixMeta{}
 
 	// Second pass: decode field values in order
 	for i := 0; i < v.NumField(); i++ {
@@ -242,7 +250,7 @@ func unmarshalStruct(r *asn1.BitReader, v reflect.Value) error {
 				base = new(big.Int).Sub(big.NewInt(*opts.SizeMax), big.NewInt(*opts.SizeMin)).Uint64() + 1
 			}
 
-			mixedRadix = append(mixedRadix, mixedRadixMeta{
+			*mixedRadixCtx = append(*mixedRadixCtx, mixedRadixMeta{
 				Field:     field,
 				Opts:      opts,
 				Base:      base,
@@ -251,7 +259,7 @@ func unmarshalStruct(r *asn1.BitReader, v reflect.Value) error {
 			continue
 		}
 
-		if err := UnmarshalValue(r, field, opts); err != nil {
+		if err := unmarshalValue(r, field, opts, mixedRadixCtx); err != nil {
 			// Wrap the error with field context if not already wrapped
 			var e *asn1.Error
 			if errors.As(err, &e) && e.Field == "" {
@@ -261,7 +269,9 @@ func unmarshalStruct(r *asn1.BitReader, v reflect.Value) error {
 		}
 	}
 
-	if len(mixedRadix) == 0 {
+	mixedRadix := *mixedRadixCtx
+
+	if nestedMixedRadix || len(mixedRadix) == 0 {
 		return nil
 	}
 
@@ -340,7 +350,7 @@ type mixedRadixMeta struct {
 
 // unmarshalChoice decodes a CHOICE type.
 // The choice index is decoded first, followed by the chosen value.
-func unmarshalChoice(r *asn1.BitReader, v reflect.Value) error {
+func unmarshalChoice(r *asn1.BitReader, v reflect.Value, mixedRadixCtx *[]mixedRadixMeta) error {
 	t := v.Type()
 
 	// Build a list of choice alternatives
@@ -433,7 +443,7 @@ func unmarshalChoice(r *asn1.BitReader, v reflect.Value) error {
 		target = target.Elem()
 	}
 
-	if err := UnmarshalValue(r, target, selectedAlt.opts); err != nil {
+	if err := unmarshalValue(r, target, selectedAlt.opts, mixedRadixCtx); err != nil {
 		sf := t.Field(selectedAlt.fieldIndex)
 		var e *asn1.Error
 		if errors.As(err, &e) && e.Field == "" {
