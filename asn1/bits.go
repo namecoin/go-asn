@@ -1,6 +1,9 @@
 package asn1
 
-import "fmt"
+import (
+	"fmt"
+	"reflect"
+)
 
 // BitWriter writes individual bits to a byte buffer.
 // Bits are written MSB-first within each byte, following the ASN.1 PER convention.
@@ -163,4 +166,18 @@ func (r *BitReader) BitPosition() int {
 // RemainingBits returns the number of unread bits.
 func (r *BitReader) RemainingBits() int {
 	return len(r.data)*8 - r.bitPos
+}
+
+var MixedRadixKinds = []reflect.Kind{
+	reflect.Bool,
+	reflect.Int,
+	reflect.Int8,
+	reflect.Int16,
+	reflect.Int32,
+	reflect.Int64,
+	reflect.Uint,
+	reflect.Uint8,
+	reflect.Uint16,
+	reflect.Uint32,
+	reflect.Uint64,
 }

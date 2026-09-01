@@ -1,9 +1,14 @@
 package uper
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
+	"math/big"
+	"math/bits"
 	"reflect"
+	"slices"
 
 	"github.com/namecoin/go-asn/asn1"
 )
@@ -20,8 +25,6 @@ func Unmarshal(data []byte, v interface{}) error {
 	return UnmarshalValue(r, rv.Elem(), asn1.FieldOptions{})
 }
 
-// Namecoin: Public in order to facilitate using an out of band length for SEQUENCE OF.
-// UnmarshalValue decodes a single value based on its type.
 func UnmarshalValue(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) error {
 	// Handle pointers - allocate if nil
 	if v.Kind() == reflect.Ptr {
@@ -186,6 +189,8 @@ func unmarshalStruct(r *asn1.BitReader, v reflect.Value) error {
 		optionalPresence[of.index] = of.present
 	}
 
+	mixedRadix := []mixedRadixMeta{}
+
 	// Second pass: decode field values in order
 	for i := 0; i < v.NumField(); i++ {
 		field := v.Field(i)
@@ -217,6 +222,35 @@ func unmarshalStruct(r *asn1.BitReader, v reflect.Value) error {
 			}
 		}
 
+		kind := field.Kind()
+		if kind == reflect.Pointer {
+			kind = field.Type().Elem().Kind()
+		}
+		if slices.Contains(asn1.MixedRadixKinds, kind) {
+			var base uint64
+			switch {
+			case kind == reflect.Bool:
+				base = 2
+			case opts.SizeMin == nil || opts.SizeMax == nil:
+				return &asn1.Error{
+					Op:     "unmarshal",
+					Type:   t.Name(),
+					Field:  sf.Name,
+					Reason: "Size constraints are required for mixed radix kinds",
+				}
+			default:
+				base = new(big.Int).Sub(big.NewInt(*opts.SizeMax), big.NewInt(*opts.SizeMin)).Uint64() + 1
+			}
+
+			mixedRadix = append(mixedRadix, mixedRadixMeta{
+				Field:     field,
+				Opts:      opts,
+				Base:      base,
+				FieldMeta: sf,
+			})
+			continue
+		}
+
 		if err := UnmarshalValue(r, field, opts); err != nil {
 			// Wrap the error with field context if not already wrapped
 			var e *asn1.Error
@@ -227,7 +261,81 @@ func unmarshalStruct(r *asn1.BitReader, v reflect.Value) error {
 		}
 	}
 
+	if len(mixedRadix) == 0 {
+		return nil
+	}
+
+	prevBase := mixedRadix[0].Base
+	cumBases := []uint64{prevBase}
+	idx := 0
+
+	if len(mixedRadix) != 1 {
+		for _, num := range mixedRadix[1:] {
+			if prevBase > math.MaxUint64/cumBases[idx] {
+				cumBases = append(cumBases, 1)
+				idx++
+			}
+
+			prevBase = num.Base
+			cumBases[idx] *= prevBase
+		}
+	}
+
+	encodedData := make([]uint64, 0, len(cumBases))
+	for _, base := range cumBases {
+		bytes, err := r.ReadBits(bitsNeeded(uint64(base - 1)))
+		if err != nil {
+			return err
+		}
+		encodedData = append(encodedData, bytes)
+	}
+
+	idx = 0
+	for _, num := range mixedRadix {
+		encoded := &encodedData[idx]
+		var value uint64
+		if *encoded >= uint64(num.Base) {
+			value = *encoded % uint64(num.Base)
+			*encoded /= uint64(num.Base)
+		} else {
+			value = *encoded
+			idx++
+		}
+
+		// There has to be a better way to do this
+		bitCount := bitsNeeded(uint64(num.Base - 1))
+		if bitCount > 8 {
+			switch {
+			case bitCount <= 16:
+				value = uint64(bits.ReverseBytes16(uint16(value)))
+			case bitCount <= 32:
+				value = uint64(bits.ReverseBytes32(uint32(value)))
+			default:
+				value = bits.ReverseBytes64(value)
+			}
+		}
+
+		arr := binary.LittleEndian.AppendUint64(nil, value)
+
+		r = asn1.NewBitReader(arr, false)
+		if err := UnmarshalValue(r, num.Field, num.Opts); err != nil {
+			// Wrap the error with field context if not already wrapped
+			var e *asn1.Error
+			if errors.As(err, &e) && e.Field == "" {
+				e.Field = num.FieldMeta.Name
+			}
+			return err
+		}
+	}
+
 	return nil
+}
+
+type mixedRadixMeta struct {
+	Field     reflect.Value
+	FieldMeta reflect.StructField
+	Opts      asn1.FieldOptions
+	Base      uint64
 }
 
 // unmarshalChoice decodes a CHOICE type.
