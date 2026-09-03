@@ -26,10 +26,10 @@ func Unmarshal(data []byte, v interface{}) error {
 }
 
 func UnmarshalValue(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) error {
-	return unmarshalValue(r, v, opts, nil)
+	return unmarshalValue(r, v, opts, nil, nil)
 }
 
-func unmarshalValue(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions, mixedRadixCtx *[]mixedRadixMeta) error {
+func unmarshalValue(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions, mixedRadixCtx *[]mixedRadixMeta, offset *uint64) error {
 	// Handle pointers - allocate if nil
 	if v.Kind() == reflect.Ptr {
 		if v.IsNil() {
@@ -48,11 +48,11 @@ func unmarshalValue(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions, 
 	case reflect.Struct:
 		return unmarshalStruct(r, v, mixedRadixCtx)
 	case reflect.String:
-		return unmarshalString(r, v, opts)
+		return unmarshalString(r, v, opts, offset)
 	case reflect.Slice:
 		// Check if this is a byte slice (OCTET STRING)
 		if v.Type().Elem().Kind() == reflect.Uint8 {
-			return unmarshalOctetString(r, v, opts)
+			return unmarshalOctetString(r, v, opts, offset)
 		}
 		return unmarshalSequenceOf(r, v, opts)
 	default:
@@ -132,6 +132,59 @@ func unmarshalInt(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) er
 // unmarshalUint decodes a constrained unsigned integer using UPER encoding.
 func unmarshalUint(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) error {
 	return unmarshalAnyInt(r, v, opts, true)
+}
+
+type mixedRadixDeferred struct {
+	Meta  *mixedRadixMeta
+	Value uint64
+}
+
+func handleMixedRadix(field reflect.Value, sf reflect.StructField, t reflect.Type, opts *asn1.FieldOptions, mixedRadixCtx *[]mixedRadixMeta) (bool, error) {
+	fieldType := field.Type()
+	if fieldType.Kind() == reflect.Pointer {
+		fieldType = fieldType.Elem()
+	}
+
+	kind := fieldType.Kind()
+
+	if slices.Contains(asn1.MixedRadixKinds, kind) {
+		var base *uint64
+		switch {
+		case kind == reflect.Bool:
+			tmp := uint64(2)
+			base = &tmp
+		case opts.SizeMin == nil || opts.SizeMax == nil:
+			return false, &asn1.Error{
+				Op:     "unmarshal",
+				Type:   t.Name(),
+				Field:  sf.Name,
+				Reason: "Size constraints are required for mixed radix kinds",
+			}
+		case kind == reflect.String:
+			fallthrough
+		case kind == reflect.Slice && fieldType.Elem().Kind() == reflect.Uint8:
+			// Not mixed radix when statically sized
+			if *opts.SizeMin == *opts.SizeMax {
+				break
+			}
+			fallthrough
+		default:
+			tmp := new(big.Int).Sub(big.NewInt(*opts.SizeMax), big.NewInt(*opts.SizeMin)).Uint64() + 1
+			base = &tmp
+		}
+
+		if base != nil {
+			*mixedRadixCtx = append(*mixedRadixCtx, mixedRadixMeta{
+				Field:     field,
+				Opts:      *opts,
+				Base:      *base,
+				FieldMeta: sf,
+			})
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 // unmarshalStruct decodes each exported field of a struct in sequence.
@@ -230,36 +283,16 @@ func unmarshalStruct(r *asn1.BitReader, v reflect.Value, mixedRadixCtx *[]mixedR
 			}
 		}
 
-		kind := field.Kind()
-		if kind == reflect.Pointer {
-			kind = field.Type().Elem().Kind()
+		skip, err := handleMixedRadix(field, sf, t, &opts, mixedRadixCtx)
+		if err != nil {
+			return err
 		}
-		if slices.Contains(asn1.MixedRadixKinds, kind) {
-			var base uint64
-			switch {
-			case kind == reflect.Bool:
-				base = 2
-			case opts.SizeMin == nil || opts.SizeMax == nil:
-				return &asn1.Error{
-					Op:     "unmarshal",
-					Type:   t.Name(),
-					Field:  sf.Name,
-					Reason: "Size constraints are required for mixed radix kinds",
-				}
-			default:
-				base = new(big.Int).Sub(big.NewInt(*opts.SizeMax), big.NewInt(*opts.SizeMin)).Uint64() + 1
-			}
 
-			*mixedRadixCtx = append(*mixedRadixCtx, mixedRadixMeta{
-				Field:     field,
-				Opts:      opts,
-				Base:      base,
-				FieldMeta: sf,
-			})
+		if skip {
 			continue
 		}
 
-		if err := unmarshalValue(r, field, opts, mixedRadixCtx); err != nil {
+		if err := unmarshalValue(r, field, opts, mixedRadixCtx, nil); err != nil {
 			// Wrap the error with field context if not already wrapped
 			var e *asn1.Error
 			if errors.As(err, &e) && e.Field == "" {
@@ -278,15 +311,17 @@ func unmarshalStruct(r *asn1.BitReader, v reflect.Value, mixedRadixCtx *[]mixedR
 	prevBase := mixedRadix[0].Base
 	cumBases := []uint64{prevBase}
 	idx := 0
+	thresholds := []int{}
 
 	if len(mixedRadix) != 1 {
-		for _, num := range mixedRadix[1:] {
+		for i, num := range mixedRadix[1:] {
+			prevBase = num.Base
 			if prevBase > math.MaxUint64/cumBases[idx] {
 				cumBases = append(cumBases, 1)
 				idx++
+				thresholds = append(thresholds, i+1)
 			}
 
-			prevBase = num.Base
 			cumBases[idx] *= prevBase
 		}
 	}
@@ -300,16 +335,40 @@ func unmarshalStruct(r *asn1.BitReader, v reflect.Value, mixedRadixCtx *[]mixedR
 		encodedData = append(encodedData, bytes)
 	}
 
+	deferred := []mixedRadixDeferred{}
+
 	idx = 0
-	for _, num := range mixedRadix {
+	for i, num := range mixedRadix {
 		encoded := &encodedData[idx]
 		var value uint64
-		if *encoded >= uint64(num.Base) {
+		if !slices.Contains(thresholds, i) {
 			value = *encoded % uint64(num.Base)
 			*encoded /= uint64(num.Base)
 		} else {
 			value = *encoded
 			idx++
+		}
+
+		fieldType := num.FieldMeta.Type
+		if fieldType.Kind() == reflect.Pointer {
+			fieldType = fieldType.Elem()
+		}
+
+		switch fieldType.Kind() {
+		case reflect.Slice:
+			if fieldType.Elem().Kind() == reflect.Uint8 {
+				deferred = append(deferred, mixedRadixDeferred{
+					Value: value,
+					Meta:  &num,
+				})
+				continue
+			}
+		case reflect.String:
+			deferred = append(deferred, mixedRadixDeferred{
+				Value: value,
+				Meta:  &num,
+			})
+			continue
 		}
 
 		// There has to be a better way to do this
@@ -327,12 +386,23 @@ func unmarshalStruct(r *asn1.BitReader, v reflect.Value, mixedRadixCtx *[]mixedR
 
 		arr := binary.LittleEndian.AppendUint64(nil, value)
 
-		r = asn1.NewBitReader(arr, false)
-		if err := UnmarshalValue(r, num.Field, num.Opts); err != nil {
+		tmpReader := asn1.NewBitReader(arr, false)
+		if err := UnmarshalValue(tmpReader, num.Field, num.Opts); err != nil {
 			// Wrap the error with field context if not already wrapped
 			var e *asn1.Error
 			if errors.As(err, &e) && e.Field == "" {
 				e.Field = num.FieldMeta.Name
+			}
+			return err
+		}
+	}
+
+	for _, num := range deferred {
+		if err := unmarshalValue(r, num.Meta.Field, num.Meta.Opts, nil, &num.Value); err != nil {
+			// Wrap the error with field context if not already wrapped
+			var e *asn1.Error
+			if errors.As(err, &e) && e.Field == "" {
+				e.Field = num.Meta.FieldMeta.Name
 			}
 			return err
 		}
@@ -358,6 +428,7 @@ func unmarshalChoice(r *asn1.BitReader, v reflect.Value, mixedRadixCtx *[]mixedR
 		fieldIndex  int
 		choiceIndex int
 		opts        asn1.FieldOptions
+		sf          reflect.StructField
 	}
 
 	var alternatives []choiceAlt
@@ -389,6 +460,7 @@ func unmarshalChoice(r *asn1.BitReader, v reflect.Value, mixedRadixCtx *[]mixedR
 			fieldIndex:  i,
 			choiceIndex: choiceIdx,
 			opts:        opts,
+			sf:          sf,
 		})
 	}
 
@@ -443,7 +515,16 @@ func unmarshalChoice(r *asn1.BitReader, v reflect.Value, mixedRadixCtx *[]mixedR
 		target = target.Elem()
 	}
 
-	if err := unmarshalValue(r, target, selectedAlt.opts, mixedRadixCtx); err != nil {
+	skip, err := handleMixedRadix(field, selectedAlt.sf, t, &selectedAlt.opts, mixedRadixCtx)
+	if err != nil {
+		return err
+	}
+
+	if skip {
+		return nil
+	}
+
+	if err := unmarshalValue(r, target, selectedAlt.opts, mixedRadixCtx, nil); err != nil {
 		sf := t.Field(selectedAlt.fieldIndex)
 		var e *asn1.Error
 		if errors.As(err, &e) && e.Field == "" {
@@ -456,7 +537,7 @@ func unmarshalChoice(r *asn1.BitReader, v reflect.Value, mixedRadixCtx *[]mixedR
 }
 
 // unmarshalOctetString decodes a byte slice as an ASN.1 OCTET STRING.
-func unmarshalOctetString(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) error {
+func unmarshalOctetString(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions, offset *uint64) error {
 	if opts.SizeMin == nil || opts.SizeMax == nil {
 		return &asn1.Error{
 			Op:     "unmarshal",
@@ -474,18 +555,7 @@ func unmarshalOctetString(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOpt
 		// Fixed size
 		length = lowerBound
 	} else {
-		// Variable size - read the length offset first
-		rangeSize := upperBound - lowerBound + 1
-		numBits := bitsNeeded(uint64(rangeSize - 1))
-		offset, err := r.ReadBits(numBits)
-		if err != nil {
-			return &asn1.Error{
-				Op:     "unmarshal",
-				Type:   "[]byte",
-				Reason: fmt.Sprintf("failed to read length: %v", err),
-			}
-		}
-		length = int64(offset) + lowerBound
+		length = int64(*offset) + lowerBound
 	}
 
 	// Read the data bytes
@@ -507,7 +577,7 @@ func unmarshalOctetString(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOpt
 }
 
 // unmarshalString decodes a string using UPER encoding.
-func unmarshalString(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) error {
+func unmarshalString(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions, offset *uint64) error {
 	if opts.SizeMin == nil || opts.SizeMax == nil {
 		return &asn1.Error{
 			Op:     "unmarshal",
@@ -525,18 +595,7 @@ func unmarshalString(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions)
 		// Fixed size
 		length = lowerBound
 	} else {
-		// Variable size - read the length offset first
-		rangeSize := upperBound - lowerBound + 1
-		numBits := bitsNeeded(uint64(rangeSize - 1))
-		offset, err := r.ReadBits(numBits)
-		if err != nil {
-			return &asn1.Error{
-				Op:     "unmarshal",
-				Type:   "string",
-				Reason: fmt.Sprintf("failed to read length: %v", err),
-			}
-		}
-		length = int64(offset) + lowerBound
+		length = int64(*offset) + lowerBound
 	}
 
 	// Decode the characters based on the string type

@@ -170,6 +170,8 @@ func (r *BitReader) RemainingBits() int {
 
 var MixedRadixKinds = []reflect.Kind{
 	reflect.Bool,
+	reflect.String,
+	reflect.Slice,
 	reflect.Int,
 	reflect.Int8,
 	reflect.Int16,
