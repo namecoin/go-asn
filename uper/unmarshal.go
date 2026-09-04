@@ -160,9 +160,7 @@ func handleMixedRadix(field reflect.Value, sf reflect.StructField, t reflect.Typ
 				Field:  sf.Name,
 				Reason: "Size constraints are required for mixed radix kinds",
 			}
-		case kind == reflect.String:
-			fallthrough
-		case kind == reflect.Slice && fieldType.Elem().Kind() == reflect.Uint8:
+		case kind == reflect.String || kind == reflect.Slice:
 			// Not mixed radix when statically sized
 			if *opts.SizeMin == *opts.SizeMax {
 				break
@@ -336,6 +334,7 @@ func unmarshalStruct(r *asn1.BitReader, v reflect.Value, mixedRadixCtx *[]mixedR
 	}
 
 	deferred := []mixedRadixDeferred{}
+	deferredSequences := []mixedRadixDeferred{}
 
 	idx = 0
 	for i, num := range mixedRadix {
@@ -361,8 +360,13 @@ func unmarshalStruct(r *asn1.BitReader, v reflect.Value, mixedRadixCtx *[]mixedR
 					Value: value,
 					Meta:  &num,
 				})
-				continue
+			} else {
+				deferredSequences = append(deferredSequences, mixedRadixDeferred{
+					Value: value,
+					Meta:  &num,
+				})
 			}
+			continue
 		case reflect.String:
 			deferred = append(deferred, mixedRadixDeferred{
 				Value: value,
@@ -406,6 +410,24 @@ func unmarshalStruct(r *asn1.BitReader, v reflect.Value, mixedRadixCtx *[]mixedR
 			}
 			return err
 		}
+	}
+
+	for _, seq := range deferredSequences {
+		elemType := seq.Meta.FieldMeta.Type.Elem()
+		length := int(int64(seq.Value) + *seq.Meta.Opts.SizeMin)
+		slice := reflect.MakeSlice(elemType, length, length)
+		for i := 0; i < length; i++ {
+			elem := slice.Index(i)
+			if err := UnmarshalValue(r, elem, asn1.FieldOptions{}); err != nil {
+				return &asn1.Error{
+					Op:     "unmarshal",
+					Type:   elemType.String(),
+					Reason: fmt.Sprintf("element %d: %v", i, err),
+				}
+			}
+		}
+
+		seq.Meta.Field.Set(slice)
 	}
 
 	return nil

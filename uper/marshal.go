@@ -71,7 +71,7 @@ func marshalValue(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOptions, mi
 		if v.Type().Elem().Kind() == reflect.Uint8 {
 			return marshalOctetString(w, v.Bytes(), opts)
 		}
-		return nil, marshalSequenceOf(w, v, opts)
+		return marshalSequenceOf(w, v, opts)
 	default:
 		return nil, &asn1.Error{
 			Op:     "marshal",
@@ -236,6 +236,21 @@ func marshalStruct(w *asn1.BitWriter, v reflect.Value, mixedRadixCtx *[]mixedRad
 			err := w.WriteBits(uint64(b), data.BitLen)
 			if err != nil {
 				return err
+			}
+		}
+	}
+
+	for _, num := range nums {
+		if num.Sequence != nil {
+			for i := 0; i < v.Len(); i++ {
+				elem := v.Index(i)
+				if err := MarshalValue(w, elem, asn1.FieldOptions{}); err != nil {
+					return &asn1.Error{
+						Op:     "marshal",
+						Type:   v.Type().String(),
+						Reason: fmt.Sprintf("element %d: %v", i, err),
+					}
+				}
 			}
 		}
 	}
@@ -419,9 +434,10 @@ type extraData struct {
 }
 
 type mixedRadixNumber struct {
-	Value  uint64
-	States uint64
-	Extra  *extraData // May be nil, used for data that should be written after mixed radix data
+	Value    uint64
+	States   uint64
+	Extra    *extraData     // May be nil, used for data that should be written after mixed radix data
+	Sequence *reflect.Value // May be nil, used for SEQUENCE OF
 }
 
 // marshalInt encodes a constrained integer using UPER encoding.
@@ -522,9 +538,9 @@ func marshalOctetString(w *asn1.BitWriter, data []byte, opts asn1.FieldOptions) 
 
 // marshalSequenceOf encodes a slice as an ASN.1 SEQUENCE OF.
 // The length (as an offset from the minimum) is encoded first, followed by each element.
-func marshalSequenceOf(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOptions) error {
+func marshalSequenceOf(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOptions) (*mixedRadixNumber, error) {
 	if opts.SizeMin == nil || opts.SizeMax == nil {
-		return &asn1.Error{
+		return nil, &asn1.Error{
 			Op:     "marshal",
 			Type:   v.Type().String(),
 			Reason: "SEQUENCE OF requires size constraint",
@@ -532,7 +548,7 @@ func marshalSequenceOf(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOption
 	}
 
 	if slices.Contains(asn1.MixedRadixKinds, v.Elem().Kind()) {
-		return &asn1.Error{
+		return nil, &asn1.Error{
 			Op:     "marshal",
 			Type:   v.Type().String(),
 			Reason: "SEQUENCE OF mixed radix kinds is not supported",
@@ -545,7 +561,7 @@ func marshalSequenceOf(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOption
 
 	// Validate the length is within the specified range
 	if length < lowerBound || length > upperBound {
-		return &asn1.Error{
+		return nil, &asn1.Error{
 			Op:     "marshal",
 			Type:   v.Type().String(),
 			Reason: fmt.Sprintf("length %d out of range [%d, %d]", length, lowerBound, upperBound),
@@ -555,11 +571,12 @@ func marshalSequenceOf(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOption
 	// For variable-length SEQUENCE OF, encode the length first
 	if lowerBound != upperBound {
 		rangeSize := upperBound - lowerBound + 1
-		numBits := bitsNeeded(uint64(rangeSize - 1))
 		offset := uint64(length - lowerBound)
-		if err := w.WriteBits(offset, numBits); err != nil {
-			return err
-		}
+		return &mixedRadixNumber{
+			Value:    offset,
+			States:   uint64(rangeSize),
+			Sequence: &v,
+		}, nil
 	}
 
 	// Encode each element
@@ -568,7 +585,7 @@ func marshalSequenceOf(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOption
 		// Pass empty options for elements - they should have their own constraints
 		// defined by the element type's struct tags
 		if err := MarshalValue(w, elem, asn1.FieldOptions{}); err != nil {
-			return &asn1.Error{
+			return nil, &asn1.Error{
 				Op:     "marshal",
 				Type:   v.Type().String(),
 				Reason: fmt.Sprintf("element %d: %v", i, err),
@@ -576,7 +593,7 @@ func marshalSequenceOf(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOption
 		}
 	}
 
-	return nil
+	return nil, nil
 }
 
 // marshalString encodes a string using UPER encoding.
