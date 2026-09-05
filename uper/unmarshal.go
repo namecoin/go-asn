@@ -375,7 +375,6 @@ func unmarshalStruct(r *asn1.BitReader, v reflect.Value, mixedRadixCtx *[]mixedR
 			continue
 		}
 
-		// There has to be a better way to do this
 		bitCount := bitsNeeded(uint64(num.Base - 1))
 		if bitCount > 8 {
 			switch {
@@ -389,6 +388,11 @@ func unmarshalStruct(r *asn1.BitReader, v reflect.Value, mixedRadixCtx *[]mixedR
 		}
 
 		arr := binary.LittleEndian.AppendUint64(nil, value)
+		for i := range arr {
+			for arr[i] != 0 && arr[i] < 128 {
+				arr[i] <<= 1
+			}
+		}
 
 		tmpReader := asn1.NewBitReader(arr, false)
 		if err := UnmarshalValue(tmpReader, num.Field, num.Opts); err != nil {
