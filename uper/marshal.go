@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"math"
 	"reflect"
-	"slices"
 
 	"github.com/namecoin/go-asn/asn1"
 )
@@ -23,7 +22,7 @@ func Marshal(v interface{}) ([]byte, error) {
 	}
 
 	// TODO: Allow
-	if slices.Contains(asn1.MixedRadixKinds, rv.Kind()) {
+	if rv.Kind() != reflect.Struct {
 		return nil, errors.New("Mixed radix kinds must not be marshalled directly")
 	}
 
@@ -547,7 +546,7 @@ func marshalSequenceOf(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOption
 		}
 	}
 
-	if slices.Contains(asn1.MixedRadixKinds, v.Elem().Kind()) {
+	if v.Elem().Kind() == reflect.Struct {
 		return nil, &asn1.Error{
 			Op:     "marshal",
 			Type:   v.Type().String(),

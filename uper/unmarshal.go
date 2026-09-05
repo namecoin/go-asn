@@ -147,7 +147,7 @@ func handleMixedRadix(field reflect.Value, sf reflect.StructField, t reflect.Typ
 
 	kind := fieldType.Kind()
 
-	if slices.Contains(asn1.MixedRadixKinds, kind) {
+	if kind != reflect.Struct {
 		var base *uint64
 		switch {
 		case kind == reflect.Bool:
