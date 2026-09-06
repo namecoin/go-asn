@@ -241,7 +241,9 @@ func marshalStruct(w *asn1.BitWriter, v reflect.Value, mixedRadixCtx *[]mixedRad
 
 	for _, num := range nums {
 		if num.Sequence != nil {
-			for i := 0; i < v.Len(); i++ {
+			v = *num.Sequence
+			length := v.Len()
+			for i := range length {
 				elem := v.Index(i)
 				if err := MarshalValue(w, elem, asn1.FieldOptions{}); err != nil {
 					return &asn1.Error{

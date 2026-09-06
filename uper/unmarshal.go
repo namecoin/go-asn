@@ -420,7 +420,7 @@ func unmarshalStruct(r *asn1.BitReader, v reflect.Value, mixedRadixCtx *[]mixedR
 		elemType := seq.Meta.FieldMeta.Type.Elem()
 		length := int(int64(seq.Value) + *seq.Meta.Opts.SizeMin)
 		slice := reflect.MakeSlice(elemType, length, length)
-		for i := 0; i < length; i++ {
+		for i := range length {
 			elem := slice.Index(i)
 			if err := UnmarshalValue(r, elem, asn1.FieldOptions{}); err != nil {
 				return &asn1.Error{
