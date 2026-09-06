@@ -1,12 +1,10 @@
 package uper
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
 	"math/big"
-	"math/bits"
 	"reflect"
 	"slices"
 
@@ -376,25 +374,10 @@ func unmarshalStruct(r *asn1.BitReader, v reflect.Value, mixedRadixCtx *[]mixedR
 		}
 
 		bitCount := bitsNeeded(uint64(num.Base - 1))
-		if bitCount > 8 {
-			switch {
-			case bitCount <= 16:
-				value = uint64(bits.ReverseBytes16(uint16(value)))
-			case bitCount <= 32:
-				value = uint64(bits.ReverseBytes32(uint32(value)))
-			default:
-				value = bits.ReverseBytes64(value)
-			}
-		}
+		writer := asn1.NewBitWriter(false)
+		writer.WriteBits(value, bitCount)
 
-		arr := binary.LittleEndian.AppendUint64(nil, value)
-		for i := range arr {
-			for arr[i] != 0 && arr[i] < 128 {
-				arr[i] <<= 1
-			}
-		}
-
-		tmpReader := asn1.NewBitReader(arr, false)
+		tmpReader := asn1.NewBitReader(writer.Bytes(), false)
 		if err := UnmarshalValue(tmpReader, num.Field, num.Opts); err != nil {
 			// Wrap the error with field context if not already wrapped
 			var e *asn1.Error
