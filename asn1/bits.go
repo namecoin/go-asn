@@ -2,6 +2,7 @@ package asn1
 
 import (
 	"fmt"
+	"math/big"
 )
 
 // BitWriter writes individual bits to a byte buffer.
@@ -165,4 +166,9 @@ func (r *BitReader) BitPosition() int {
 // RemainingBits returns the number of unread bits.
 func (r *BitReader) RemainingBits() int {
 	return len(r.data)*8 - r.bitPos
+}
+
+type MixedRadixNumber struct {
+	Value *big.Int
+	Base  *big.Int
 }

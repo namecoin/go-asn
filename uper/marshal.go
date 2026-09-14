@@ -3,7 +3,7 @@ package uper
 import (
 	"errors"
 	"fmt"
-	"math"
+	"math/big"
 	"reflect"
 
 	"github.com/namecoin/go-asn/asn1"
@@ -21,26 +21,20 @@ func Marshal(v interface{}) ([]byte, error) {
 		rv = rv.Elem()
 	}
 
-	// TODO: Allow
-	if rv.Kind() != reflect.Struct {
-		return nil, errors.New("Mixed radix kinds must not be marshalled directly")
+	value := asn1.MixedRadixNumber{
+		Value: new(big.Int),
+		Base:  big.NewInt(1),
 	}
-
-	w := asn1.NewBitWriter(false) // UPER is unaligned
-	if err := MarshalValue(w, rv, asn1.FieldOptions{}); err != nil {
+	if err := MarshalValue(&value, rv, asn1.FieldOptions{}); err != nil {
 		return nil, err
 	}
 
-	return w.Bytes(), nil
+	return value.Value.Bytes(), nil
 }
 
-func MarshalValue(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOptions) error {
-	_, err := marshalValue(w, v, opts, nil)
-	return err
-}
-
+// Namecoin: Public in order to facilitate using an out of band length for SEQUENCE OF.
 // MarshalValue encodes a single value based on its type.
-func marshalValue(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOptions, mixedRadixCtx *[]mixedRadixNumber) (*mixedRadixNumber, error) {
+func MarshalValue(mixedRadixCtx *asn1.MixedRadixNumber, v reflect.Value, opts asn1.FieldOptions) error {
 	// Handle pointers - dereference to get the underlying value.
 	// Optional fields use pointers to indicate presence (non-nil = present).
 	// By the time we reach here, the preamble has already been written and
@@ -48,31 +42,31 @@ func marshalValue(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOptions, mi
 	if v.Kind() == reflect.Ptr {
 		if v.IsNil() {
 			// Optional field not present - already handled by the preamble
-			return nil, nil
+			return nil
 		}
 		v = v.Elem()
 	}
 
 	switch v.Kind() {
 	case reflect.Bool:
-		ret := marshalBool(v.Bool())
-		return &ret, nil
+		marshalBool(mixedRadixCtx, v.Bool())
+		return nil
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return marshalInt(v.Int(), opts)
+		return marshalInt(mixedRadixCtx, v.Int(), opts)
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return marshalInt(int64(v.Uint()), opts)
+		return marshalInt(mixedRadixCtx, int64(v.Uint()), opts)
 	case reflect.Struct:
-		return nil, marshalStruct(w, v, mixedRadixCtx)
+		return marshalStruct(mixedRadixCtx, v)
 	case reflect.String:
-		return marshalString(w, v.String(), opts)
+		return marshalString(mixedRadixCtx, v.String(), opts)
 	case reflect.Slice:
 		// Check if this is a byte slice (OCTET STRING)
 		if v.Type().Elem().Kind() == reflect.Uint8 {
-			return marshalOctetString(w, v.Bytes(), opts)
+			return marshalOctetString(mixedRadixCtx, v.Bytes(), opts)
 		}
-		return marshalSequenceOf(w, v, opts)
+		return marshalSequenceOf(mixedRadixCtx, v, opts)
 	default:
-		return nil, &asn1.Error{
+		return &asn1.Error{
 			Op:     "marshal",
 			Type:   v.Type().String(),
 			Reason: fmt.Sprintf("unsupported type: %s", v.Kind()),
@@ -82,11 +76,14 @@ func marshalValue(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOptions, mi
 
 // marshalBool encodes a boolean as a single bit.
 // In UPER, true is encoded as 1 and false as 0.
-func marshalBool(v bool) mixedRadixNumber {
+func marshalBool(mixedRadixCtx *asn1.MixedRadixNumber, v bool) {
+	value := int64(0)
 	if v {
-		return mixedRadixNumber{Value: 1, States: 2}
+		value = 1
 	}
-	return mixedRadixNumber{Value: 0, States: 2}
+	mult := new(big.Int).Mul(big.NewInt(value), mixedRadixCtx.Base)
+	mixedRadixCtx.Value.Add(mixedRadixCtx.Value, mult)
+	mixedRadixCtx.Base.Mul(mixedRadixCtx.Base, big.NewInt(2))
 }
 
 // marshalStruct encodes each exported field of a struct in sequence.
@@ -96,18 +93,12 @@ func marshalBool(v bool) mixedRadixNumber {
 //
 // If the struct represents a CHOICE (all exported fields have choice:N tags
 // or are pointer types with exactly one non-nil), it is encoded as a CHOICE.
-func marshalStruct(w *asn1.BitWriter, v reflect.Value, mixedRadixCtx *[]mixedRadixNumber) error {
+func marshalStruct(mixedRadixCtx *asn1.MixedRadixNumber, v reflect.Value) error {
 	t := v.Type()
-
-	nestedMixedRadix := true
-	if mixedRadixCtx == nil {
-		nestedMixedRadix = false
-		mixedRadixCtx = &[]mixedRadixNumber{}
-	}
 
 	// Check if this struct represents a CHOICE type
 	if isChoiceStruct(v) {
-		return marshalChoice(w, v, mixedRadixCtx)
+		return marshalChoice(mixedRadixCtx, v)
 	}
 
 	// First pass: identify optional fields and write the presence preamble.
@@ -138,15 +129,14 @@ func marshalStruct(w *asn1.BitWriter, v reflect.Value, mixedRadixCtx *[]mixedRad
 	for _, idx := range optionalFieldIndices {
 		field := v.Field(idx)
 		present := !isFieldAbsent(field)
+		value := 0
 		if present {
-			if err := w.WriteBits(1, 1); err != nil {
-				return err
-			}
-		} else {
-			if err := w.WriteBits(0, 1); err != nil {
-				return err
-			}
+			value = 1
 		}
+
+		mul := new(big.Int).Mul(big.NewInt(int64(value)), mixedRadixCtx.Base)
+		mixedRadixCtx.Value.Add(mixedRadixCtx.Value, mul)
+		mixedRadixCtx.Base.Mul(mixedRadixCtx.Base, big.NewInt(2))
 	}
 
 	// Second pass: encode field values in order
@@ -176,8 +166,7 @@ func marshalStruct(w *asn1.BitWriter, v reflect.Value, mixedRadixCtx *[]mixedRad
 			continue
 		}
 
-		var num *mixedRadixNumber
-		if num, err = marshalValue(w, field, opts, mixedRadixCtx); err != nil {
+		if err := MarshalValue(mixedRadixCtx, field, opts); err != nil {
 			// Wrap the error with field context if not already wrapped
 			var e *asn1.Error
 			if errors.As(err, &e) && e.Field == "" {
@@ -185,83 +174,9 @@ func marshalStruct(w *asn1.BitWriter, v reflect.Value, mixedRadixCtx *[]mixedRad
 			}
 			return err
 		}
-
-		if num != nil {
-			*mixedRadixCtx = append(*mixedRadixCtx, *num)
-		}
-	}
-
-	nums := *mixedRadixCtx
-
-	if nestedMixedRadix || len(nums) == 0 {
-		return nil
-	}
-
-	prevBase := uint64(1)
-	mixed := []mixedRadixEncoded{{CumulativeBases: 1}}
-	mixedIdx := 0
-
-	extra := []extraData{}
-
-	i := 0
-	for i < len(nums) {
-		mixedRadix := &mixed[mixedIdx]
-		prevBase = nums[i].States
-
-		if nums[i].Extra != nil {
-			extra = append(extra, *nums[i].Extra)
-		}
-
-		if prevBase > math.MaxUint64/mixedRadix.CumulativeBases {
-			prevBase = nums[i-1].States
-			mixed = append(mixed, mixedRadixEncoded{CumulativeBases: 1})
-			mixedIdx++
-		} else {
-			mixedRadix.Value += nums[i].Value * mixedRadix.CumulativeBases
-			mixedRadix.CumulativeBases *= prevBase
-			i++
-		}
-	}
-
-	for _, num := range mixed {
-		err := w.WriteBits(uint64(num.Value), bitsNeeded(uint64(num.CumulativeBases-1)))
-		if err != nil {
-			return err
-		}
-	}
-
-	for _, data := range extra {
-		for _, b := range data.Bytes {
-			err := w.WriteBits(uint64(b), data.BitLen)
-			if err != nil {
-				return err
-			}
-		}
-	}
-
-	for _, num := range nums {
-		if num.Sequence != nil {
-			v = *num.Sequence
-			length := v.Len()
-			for i := range length {
-				elem := v.Index(i)
-				if err := MarshalValue(w, elem, asn1.FieldOptions{}); err != nil {
-					return &asn1.Error{
-						Op:     "marshal",
-						Type:   v.Type().String(),
-						Reason: fmt.Sprintf("element %d: %v", i, err),
-					}
-				}
-			}
-		}
 	}
 
 	return nil
-}
-
-type mixedRadixEncoded struct {
-	Value           uint64
-	CumulativeBases uint64
 }
 
 // isFieldAbsent returns true if the field is considered absent for optional encoding.
@@ -319,7 +234,7 @@ func isChoiceStruct(v reflect.Value) bool {
 // marshalChoice encodes a CHOICE type.
 // The choice index is encoded first (using the minimum bits for the number of alternatives),
 // followed by the chosen value.
-func marshalChoice(w *asn1.BitWriter, v reflect.Value, mixedRadixCtx *[]mixedRadixNumber) error {
+func marshalChoice(mixedRadixCtx *asn1.MixedRadixNumber, v reflect.Value) error {
 	t := v.Type()
 
 	// Build a map of choice index to field index, and find the selected alternative
@@ -396,10 +311,9 @@ func marshalChoice(w *asn1.BitWriter, v reflect.Value, mixedRadixCtx *[]mixedRad
 	// Encode the choice index
 	// The index uses the minimum bits to represent the number of alternatives
 	numAlternatives := len(alternatives)
-	numBits := bitsNeeded(uint64(numAlternatives - 1))
-	if err := w.WriteBits(uint64(selectedChoiceIndex), numBits); err != nil {
-		return err
-	}
+	mul := new(big.Int).Mul(big.NewInt(int64(selectedChoiceIndex)), mixedRadixCtx.Base)
+	mixedRadixCtx.Value.Add(mixedRadixCtx.Value, mul)
+	mixedRadixCtx.Base.Mul(mixedRadixCtx.Base, big.NewInt(int64(numAlternatives)))
 
 	// Encode the selected value
 	field := v.Field(selectedField)
@@ -412,9 +326,7 @@ func marshalChoice(w *asn1.BitWriter, v reflect.Value, mixedRadixCtx *[]mixedRad
 		field = field.Elem()
 	}
 
-	var num *mixedRadixNumber
-	var err error
-	if num, err = marshalValue(w, field, opts, mixedRadixCtx); err != nil {
+	if err := MarshalValue(mixedRadixCtx, field, opts); err != nil {
 		var e *asn1.Error
 		if errors.As(err, &e) && e.Field == "" {
 			e.Field = sf.Name
@@ -422,32 +334,16 @@ func marshalChoice(w *asn1.BitWriter, v reflect.Value, mixedRadixCtx *[]mixedRad
 		return err
 	}
 
-	if num != nil {
-		*mixedRadixCtx = append(*mixedRadixCtx, *num)
-	}
-
 	return nil
-}
-
-type extraData struct {
-	Bytes  []byte
-	BitLen int // Bit length of each byte in ExtraBytes, used for strings
-}
-
-type mixedRadixNumber struct {
-	Value    uint64
-	States   uint64
-	Extra    *extraData     // May be nil, used for data that should be written after mixed radix data
-	Sequence *reflect.Value // May be nil, used for SEQUENCE OF
 }
 
 // marshalInt encodes a constrained integer using UPER encoding.
 // The value is encoded as an offset from the minimum, using the minimum
 // number of bits required to represent the range.
-func marshalInt(v int64, opts asn1.FieldOptions) (*mixedRadixNumber, error) {
+func marshalInt(mixedRadixCtx *asn1.MixedRadixNumber, v int64, opts asn1.FieldOptions) error {
 	// Constrained integer requires size bounds
 	if opts.SizeMin == nil || opts.SizeMax == nil {
-		return nil, &asn1.Error{
+		return &asn1.Error{
 			Op:     "marshal",
 			Type:   "int",
 			Reason: "integer requires size constraint (e.g., size:0..255)",
@@ -459,41 +355,33 @@ func marshalInt(v int64, opts asn1.FieldOptions) (*mixedRadixNumber, error) {
 
 	// Validate the value is within the range
 	if v < lowerBound || v > upperBound {
-		return nil, &asn1.Error{
+		return &asn1.Error{
 			Op:     "marshal",
 			Type:   "int",
 			Reason: fmt.Sprintf("value %d out of range [%d, %d]", v, lowerBound, upperBound),
 		}
 	}
 
-	rangeSize := uint64(upperBound-lowerBound) + 1
+	// Calculate the number of bits needed for the range
+	rangeSize := upperBound - lowerBound + 1
 
 	// Encode the offset value (value relative to minimum)
 	offset := uint64(v - lowerBound)
-	return &mixedRadixNumber{Value: offset, States: rangeSize}, nil
-}
 
-// bitsNeeded returns the number of bits required to represent the given value.
-// Returns 1 for value 0 (at least 1 bit is needed).
-func bitsNeeded(value uint64) int {
-	if value == 0 {
-		return 1 // At least 1 bit for the value 0
-	}
-	bits := 0
-	for value > 0 {
-		bits++
-		value >>= 1
-	}
-	return bits
+	mult := new(big.Int).Mul(new(big.Int).SetUint64(offset), mixedRadixCtx.Base)
+	mixedRadixCtx.Value.Add(mixedRadixCtx.Value, mult)
+	mixedRadixCtx.Base.Mul(mixedRadixCtx.Base, big.NewInt(rangeSize))
+
+	return nil
 }
 
 // marshalOctetString encodes a byte slice as an ASN.1 OCTET STRING.
 // For fixed-size constraints (min == max), the data is written directly.
 // For variable-size constraints, the length (as an offset from min) is
 // encoded first, followed by the data.
-func marshalOctetString(w *asn1.BitWriter, data []byte, opts asn1.FieldOptions) (*mixedRadixNumber, error) {
+func marshalOctetString(mixedRadixCtx *asn1.MixedRadixNumber, data []byte, opts asn1.FieldOptions) error {
 	if opts.SizeMin == nil || opts.SizeMax == nil {
-		return nil, &asn1.Error{
+		return &asn1.Error{
 			Op:     "marshal",
 			Type:   "[]byte",
 			Reason: "OCTET STRING requires size constraint",
@@ -506,53 +394,40 @@ func marshalOctetString(w *asn1.BitWriter, data []byte, opts asn1.FieldOptions) 
 
 	// Validate the length is within the specified range
 	if length < lowerBound || length > upperBound {
-		return nil, &asn1.Error{
+		return &asn1.Error{
 			Op:     "marshal",
 			Type:   "[]byte",
 			Reason: fmt.Sprintf("length %d out of range [%d, %d]", length, lowerBound, upperBound),
 		}
 	}
 
+	// For variable-length OCTET STRING, encode the length first
 	if lowerBound != upperBound {
 		rangeSize := upperBound - lowerBound + 1
 		offset := uint64(length - lowerBound)
-		mixedRadix := mixedRadixNumber{
-			Value:  offset,
-			States: uint64(rangeSize),
-			Extra: &extraData{
-				Bytes:  data,
-				BitLen: 8,
-			},
-		}
-		return &mixedRadix, nil
+		mul := new(big.Int).Mul(new(big.Int).SetUint64(offset), mixedRadixCtx.Base)
+		mixedRadixCtx.Value.Add(mixedRadixCtx.Value, mul)
+		mixedRadixCtx.Base.Mul(mixedRadixCtx.Base, big.NewInt(rangeSize))
 	}
 
 	// Encode each byte of the data
 	for _, b := range data {
-		if err := w.WriteBits(uint64(b), 8); err != nil {
-			return nil, err
-		}
+		mul := new(big.Int).Mul(big.NewInt(int64(b)), mixedRadixCtx.Base)
+		mixedRadixCtx.Value.Add(mixedRadixCtx.Value, mul)
+		mixedRadixCtx.Base.Mul(mixedRadixCtx.Base, big.NewInt(256))
 	}
 
-	return nil, nil
+	return nil
 }
 
 // marshalSequenceOf encodes a slice as an ASN.1 SEQUENCE OF.
 // The length (as an offset from the minimum) is encoded first, followed by each element.
-func marshalSequenceOf(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOptions) (*mixedRadixNumber, error) {
+func marshalSequenceOf(mixedRadixCtx *asn1.MixedRadixNumber, v reflect.Value, opts asn1.FieldOptions) error {
 	if opts.SizeMin == nil || opts.SizeMax == nil {
-		return nil, &asn1.Error{
+		return &asn1.Error{
 			Op:     "marshal",
 			Type:   v.Type().String(),
 			Reason: "SEQUENCE OF requires size constraint",
-		}
-	}
-
-	if v.Elem().Kind() == reflect.Struct {
-		return nil, &asn1.Error{
-			Op:     "marshal",
-			Type:   v.Type().String(),
-			Reason: "SEQUENCE OF mixed radix kinds is not supported",
 		}
 	}
 
@@ -562,7 +437,7 @@ func marshalSequenceOf(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOption
 
 	// Validate the length is within the specified range
 	if length < lowerBound || length > upperBound {
-		return nil, &asn1.Error{
+		return &asn1.Error{
 			Op:     "marshal",
 			Type:   v.Type().String(),
 			Reason: fmt.Sprintf("length %d out of range [%d, %d]", length, lowerBound, upperBound),
@@ -573,11 +448,9 @@ func marshalSequenceOf(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOption
 	if lowerBound != upperBound {
 		rangeSize := upperBound - lowerBound + 1
 		offset := uint64(length - lowerBound)
-		return &mixedRadixNumber{
-			Value:    offset,
-			States:   uint64(rangeSize),
-			Sequence: &v,
-		}, nil
+		mul := new(big.Int).Mul(new(big.Int).SetUint64(offset), mixedRadixCtx.Base)
+		mixedRadixCtx.Value.Add(mixedRadixCtx.Value, mul)
+		mixedRadixCtx.Base.Mul(mixedRadixCtx.Base, big.NewInt(rangeSize))
 	}
 
 	// Encode each element
@@ -585,8 +458,8 @@ func marshalSequenceOf(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOption
 		elem := v.Index(i)
 		// Pass empty options for elements - they should have their own constraints
 		// defined by the element type's struct tags
-		if err := MarshalValue(w, elem, asn1.FieldOptions{}); err != nil {
-			return nil, &asn1.Error{
+		if err := MarshalValue(mixedRadixCtx, elem, asn1.FieldOptions{}); err != nil {
+			return &asn1.Error{
 				Op:     "marshal",
 				Type:   v.Type().String(),
 				Reason: fmt.Sprintf("element %d: %v", i, err),
@@ -594,15 +467,15 @@ func marshalSequenceOf(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOption
 		}
 	}
 
-	return nil, nil
+	return nil
 }
 
 // marshalString encodes a string using UPER encoding.
 // The string is encoded based on its ASN.1 type (IA5String, UTF8String, etc.)
 // with the appropriate character width and validation.
-func marshalString(w *asn1.BitWriter, s string, opts asn1.FieldOptions) (*mixedRadixNumber, error) {
+func marshalString(mixedRadixCtx *asn1.MixedRadixNumber, s string, opts asn1.FieldOptions) error {
 	if opts.SizeMin == nil || opts.SizeMax == nil {
-		return nil, &asn1.Error{
+		return &asn1.Error{
 			Op:     "marshal",
 			Type:   "string",
 			Reason: "string requires size constraint",
@@ -623,148 +496,137 @@ func marshalString(w *asn1.BitWriter, s string, opts asn1.FieldOptions) (*mixedR
 
 	// Validate the length is within the specified range
 	if length < lowerBound || length > upperBound {
-		return nil, &asn1.Error{
+		return &asn1.Error{
 			Op:     "marshal",
 			Type:   "string",
 			Reason: fmt.Sprintf("length %d out of range [%d, %d]", length, lowerBound, upperBound),
 		}
 	}
 
-	var mixedRadix *mixedRadixNumber
-
 	// For variable-length strings, encode the length first
 	if lowerBound != upperBound {
 		rangeSize := upperBound - lowerBound + 1
 		offset := uint64(length - lowerBound)
-		mixedRadix = &mixedRadixNumber{
-			Value:  offset,
-			States: uint64(rangeSize),
-		}
-		w = nil
+
+		mul := new(big.Int).Mul(new(big.Int).SetUint64(offset), mixedRadixCtx.Base)
+		mixedRadixCtx.Value.Add(mixedRadixCtx.Value, mul)
+		mixedRadixCtx.Base.Mul(mixedRadixCtx.Base, big.NewInt(rangeSize))
 	}
 
 	// Encode the characters based on the string type
 	switch opts.StringType {
 	case asn1.StringTypeIA5:
-		bytes, err := marshalIA5String(w, s)
-		if bytes != nil {
-			mixedRadix.Extra = &extraData{
-				Bytes:  bytes,
-				BitLen: 7,
-			}
-		}
-
-		return mixedRadix, err
+		return marshalIA5String(mixedRadixCtx, s)
 	case asn1.StringTypeVisible:
-		bytes, err := marshalVisibleString(w, s)
-		if bytes != nil {
-			mixedRadix.Extra = &extraData{
-				Bytes:  bytes,
-				BitLen: 7,
-			}
-		}
-
-		return mixedRadix, err
+		return marshalVisibleString(mixedRadixCtx, s)
 	case asn1.StringTypePrintable:
-		bytes, err := marshalPrintableString(w, s)
-		if bytes != nil {
-			mixedRadix.Extra = &extraData{
-				Bytes:  bytes,
-				BitLen: 7,
-			}
-		}
-
-		return mixedRadix, err
+		return marshalPrintableString(mixedRadixCtx, s)
 	default: // UTF8 is the default
-		bytes, err := marshalUTF8String(w, s)
-		if bytes != nil {
-			mixedRadix.Extra = &extraData{
-				Bytes:  bytes,
-				BitLen: 8,
-			}
-		}
-
-		return mixedRadix, err
+		marshalUTF8String(mixedRadixCtx, s)
+		return nil
 	}
 }
 
 // marshalIA5String encodes a string as IA5String (7 bits per character).
 // IA5String is a subset of ASCII containing characters 0-127.
-func marshalIA5String(w *asn1.BitWriter, s string) ([]byte, error) {
+func marshalIA5String(mixedRadixCtx *asn1.MixedRadixNumber, s string) error {
 	for i, c := range s {
 		if c > 127 {
-			return nil, &asn1.Error{
+			return &asn1.Error{
 				Op:     "marshal",
 				Type:   "string",
 				Reason: fmt.Sprintf("character at position %d (0x%X) is not valid IA5", i, c),
 			}
 		}
-		if w != nil {
-			// IA5 uses 7 bits per character
-			if err := w.WriteBits(uint64(c), 7); err != nil {
-				return nil, err
-			}
-		}
+		mul := new(big.Int).Mul(big.NewInt(int64(c)), mixedRadixCtx.Base)
+		mixedRadixCtx.Value.Add(mixedRadixCtx.Value, mul)
+		mixedRadixCtx.Base.Mul(mixedRadixCtx.Base, big.NewInt(128))
 	}
-
-	if w == nil {
-		return []byte(s), nil
-	}
-
-	return nil, nil
+	return nil
 }
 
 // marshalVisibleString encodes a string as VisibleString (7 bits per character).
 // VisibleString is a subset of IA5 containing ASCII characters 32-126 (printable ASCII).
-func marshalVisibleString(w *asn1.BitWriter, s string) ([]byte, error) {
+func marshalVisibleString(mixedRadixCtx *asn1.MixedRadixNumber, s string) error {
 	for i, c := range s {
 		if c < 32 || c > 126 {
-			return nil, &asn1.Error{
+			return &asn1.Error{
 				Op:     "marshal",
 				Type:   "string",
 				Reason: fmt.Sprintf("character at position %d (0x%X) is not valid VisibleString", i, c),
 			}
 		}
-		if w != nil {
-			// VisibleString uses 7 bits per character in UPER
-			if err := w.WriteBits(uint64(c), 7); err != nil {
-				return nil, err
+		mul := new(big.Int).Mul(big.NewInt(int64(c-32)), mixedRadixCtx.Base)
+		mixedRadixCtx.Value.Add(mixedRadixCtx.Value, mul)
+		mixedRadixCtx.Base.Mul(mixedRadixCtx.Base, visibleCharCount)
+	}
+	return nil
+}
+
+func printableOffset(c rune) int64 {
+	switch c {
+	case ' ':
+		return 0
+	case '\'', '(', ')':
+		return int64(c) - 38
+	case '+', ',', '-', '.', '/':
+		return int64(c) - 39
+	case ':':
+		return 9
+	case '=':
+		return 10
+	case '?':
+		return 11
+	case '\\':
+		return 12
+	default:
+		switch {
+		case c >= 'A' && c <= 'Z':
+			return int64(c) - 52
+		case c >= '0' && c <= '9':
+			return int64(c) - 9
+		case c >= 'a' && c <= 'z':
+			return int64(c) - 48
+		default:
+			return -1
+		}
+	}
+}
+
+var offsetToPrintable map[int64]rune
+
+func fillReversePrintableMap() {
+	if offsetToPrintable == nil {
+		offsetToPrintable = map[int64]rune{}
+		for x := range 122 {
+			runeValue := rune(x)
+			if isPrintableChar(runeValue) {
+				offsetToPrintable[printableOffset(runeValue)] = runeValue
 			}
 		}
 	}
-
-	if w == nil {
-		return []byte(s), nil
-	}
-
-	return nil, nil
 }
 
 // marshalPrintableString encodes a string as PrintableString (7 bits per character).
 // PrintableString is a restricted subset: A-Z, a-z, 0-9, space, and '()+,-./:=?
-func marshalPrintableString(w *asn1.BitWriter, s string) ([]byte, error) {
+func marshalPrintableString(mixedRadixCtx *asn1.MixedRadixNumber, s string) error {
+	fillReversePrintableMap()
 	for i, c := range s {
 		if !isPrintableChar(c) {
-			return nil, &asn1.Error{
+			return &asn1.Error{
 				Op:     "marshal",
 				Type:   "string",
 				Reason: fmt.Sprintf("character at position %d (%q) is not valid PrintableString", i, c),
 			}
 		}
-		if w != nil {
-			// PrintableString uses 7 bits per character in UPER
-			if err := w.WriteBits(uint64(c), 7); err != nil {
-				return nil, err
-			}
-		}
+		mul := new(big.Int).Mul(big.NewInt(printableOffset(c)), mixedRadixCtx.Base)
+		mixedRadixCtx.Value.Add(mixedRadixCtx.Value, mul)
+		mixedRadixCtx.Base.Mul(mixedRadixCtx.Base, big.NewInt(int64(len(offsetToPrintable))))
 	}
-
-	if w == nil {
-		return []byte(s), nil
-	}
-
-	return nil, nil
+	return nil
 }
+
+var visibleCharCount = big.NewInt(126 - 32 + 1)
 
 // isPrintableChar returns true if the character is valid for ASN.1 PrintableString.
 // Valid characters are: A-Z, a-z, 0-9, space, and '()+,-./:=?
@@ -787,15 +649,10 @@ func isPrintableChar(c rune) bool {
 
 // marshalUTF8String encodes a string as UTF8String (8 bits per byte).
 // The raw UTF-8 bytes are written directly.
-func marshalUTF8String(w *asn1.BitWriter, s string) ([]byte, error) {
-	if w == nil {
-		return []byte(s), nil
-	}
-
+func marshalUTF8String(mixedRadixCtx *asn1.MixedRadixNumber, s string) {
 	for _, b := range []byte(s) {
-		if err := w.WriteBits(uint64(b), 8); err != nil {
-			return nil, err
-		}
+		mul := new(big.Int).Mul(big.NewInt(int64(b)), mixedRadixCtx.Base)
+		mixedRadixCtx.Value.Add(mixedRadixCtx.Value, mul)
+		mixedRadixCtx.Base.Mul(mixedRadixCtx.Base, big.NewInt(256))
 	}
-	return nil, nil
 }
