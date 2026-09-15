@@ -1,14 +1,14 @@
-package uper
+package mixedradix
 
 import (
 	"errors"
 	"fmt"
+	"math/big"
 	"reflect"
 
 	"github.com/namecoin/go-asn/asn1"
 )
 
-// Unmarshal decodes UPER (Unaligned Packed Encoding Rules) data into a value.
 // The value must be a pointer to a struct or a basic type.
 func Unmarshal(data []byte, v interface{}) error {
 	rv := reflect.ValueOf(v)
@@ -16,13 +16,13 @@ func Unmarshal(data []byte, v interface{}) error {
 		return &asn1.Error{Op: "unmarshal", Type: "nil", Reason: "value must be a non-nil pointer"}
 	}
 
-	r := asn1.NewBitReader(data, false) // UPER is unaligned
-	return UnmarshalValue(r, rv.Elem(), asn1.FieldOptions{})
+	mixedRadix := new(big.Int).SetBytes(data)
+	return UnmarshalValue(mixedRadix, rv.Elem(), asn1.FieldOptions{})
 }
 
 // Namecoin: Public in order to facilitate using an out of band length for SEQUENCE OF.
 // UnmarshalValue decodes a single value based on its type.
-func UnmarshalValue(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) error {
+func UnmarshalValue(mixedRadix *big.Int, v reflect.Value, opts asn1.FieldOptions) error {
 	// Handle pointers - allocate if nil
 	if v.Kind() == reflect.Ptr {
 		if v.IsNil() {
@@ -33,21 +33,22 @@ func UnmarshalValue(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) 
 
 	switch v.Kind() {
 	case reflect.Bool:
-		return unmarshalBool(r, v)
+		unmarshalBool(mixedRadix, v)
+		return nil
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return unmarshalInt(r, v, opts)
+		return unmarshalInt(mixedRadix, v, opts)
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return unmarshalUint(r, v, opts)
+		return unmarshalUint(mixedRadix, v, opts)
 	case reflect.Struct:
-		return unmarshalStruct(r, v)
+		return unmarshalStruct(mixedRadix, v)
 	case reflect.String:
-		return unmarshalString(r, v, opts)
+		return unmarshalString(mixedRadix, v, opts)
 	case reflect.Slice:
 		// Check if this is a byte slice (OCTET STRING)
 		if v.Type().Elem().Kind() == reflect.Uint8 {
-			return unmarshalOctetString(r, v, opts)
+			return unmarshalOctetString(mixedRadix, v, opts)
 		}
-		return unmarshalSequenceOf(r, v, opts)
+		return unmarshalSequenceOf(mixedRadix, v, opts)
 	default:
 		return &asn1.Error{
 			Op:     "unmarshal",
@@ -58,21 +59,14 @@ func UnmarshalValue(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) 
 }
 
 // unmarshalBool decodes a boolean from a single bit.
-// In UPER, 1 is true and 0 is false.
-func unmarshalBool(r *asn1.BitReader, v reflect.Value) error {
-	bit, err := r.ReadBits(1)
-	if err != nil {
-		return &asn1.Error{
-			Op:     "unmarshal",
-			Type:   "bool",
-			Reason: fmt.Sprintf("failed to read bit: %v", err),
-		}
-	}
-	v.SetBool(bit == 1)
-	return nil
+func unmarshalBool(mixedRadix *big.Int, v reflect.Value) {
+	base := big.NewInt(2)
+	bit := new(big.Int)
+	_, bit = mixedRadix.DivMod(mixedRadix, base, bit)
+	v.SetBool(bit.Uint64() == 1)
 }
 
-func unmarshalAnyInt(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions, unsigned bool) error {
+func unmarshalAnyInt(mixedRadix *big.Int, v reflect.Value, opts asn1.FieldOptions, unsigned bool) error {
 	typeName := "int"
 	if unsigned {
 		typeName = "uint"
@@ -90,52 +84,41 @@ func unmarshalAnyInt(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions,
 	upperBound := *opts.SizeMax
 
 	// Calculate the number of bits needed for the range
-	rangeSize := upperBound - lowerBound + 1
-	numBits := bitsNeeded(uint64(rangeSize - 1))
-
-	// Read the offset value
-	offset, err := r.ReadBits(numBits)
-	if err != nil {
-		return &asn1.Error{
-			Op:     "unmarshal",
-			Type:   typeName,
-			Reason: fmt.Sprintf("failed to read %d bits: %v", numBits, err),
-		}
-	}
+	rangeSize := big.NewInt(upperBound - lowerBound + 1)
+	offset := new(big.Int)
+	_, offset = mixedRadix.DivMod(mixedRadix, rangeSize, offset)
 
 	// Calculate the actual value by adding the minimum
 	if unsigned {
-		value := offset + uint64(lowerBound)
+		value := offset.Uint64() + uint64(lowerBound)
 		v.SetUint(value)
 	} else {
-		value := int64(offset) + lowerBound
+		value := offset.Int64() + lowerBound
 		v.SetInt(value)
 	}
 
 	return nil
 }
 
-// unmarshalInt decodes a constrained integer using UPER encoding.
 // The value is decoded as an offset from the minimum, using the minimum
 // number of bits required to represent the range.
-func unmarshalInt(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) error {
-	return unmarshalAnyInt(r, v, opts, false)
+func unmarshalInt(mixedRadix *big.Int, v reflect.Value, opts asn1.FieldOptions) error {
+	return unmarshalAnyInt(mixedRadix, v, opts, false)
 }
 
-// unmarshalUint decodes a constrained unsigned integer using UPER encoding.
-func unmarshalUint(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) error {
-	return unmarshalAnyInt(r, v, opts, true)
+func unmarshalUint(mixedRadix *big.Int, v reflect.Value, opts asn1.FieldOptions) error {
+	return unmarshalAnyInt(mixedRadix, v, opts, true)
 }
 
 // unmarshalStruct decodes each exported field of a struct in sequence.
-// For UPER, optional fields are decoded with a presence bitmap (preamble)
+// Optional fields are decoded with a presence bitmap (preamble)
 // that precedes all field values.
-func unmarshalStruct(r *asn1.BitReader, v reflect.Value) error {
+func unmarshalStruct(mixedRadix *big.Int, v reflect.Value) error {
 	t := v.Type()
 
 	// Check if this struct represents a CHOICE type
 	if isChoiceStruct(v) {
-		return unmarshalChoice(r, v)
+		return unmarshalChoice(mixedRadix, v)
 	}
 
 	// First pass: identify optional fields and read the presence preamble.
@@ -169,15 +152,10 @@ func unmarshalStruct(r *asn1.BitReader, v reflect.Value) error {
 
 	// Read the presence bitmap for optional fields
 	for i := range optionalFields {
-		bit, err := r.ReadBits(1)
-		if err != nil {
-			return &asn1.Error{
-				Op:     "unmarshal",
-				Type:   t.Name(),
-				Reason: fmt.Sprintf("failed to read optional preamble: %v", err),
-			}
-		}
-		optionalFields[i].present = bit == 1
+		base := big.NewInt(2)
+		bit := new(big.Int)
+		_, bit = mixedRadix.DivMod(mixedRadix, base, bit)
+		optionalFields[i].present = bit.Uint64() == 1
 	}
 
 	// Build a map of field index to presence for quick lookup
@@ -217,7 +195,7 @@ func unmarshalStruct(r *asn1.BitReader, v reflect.Value) error {
 			}
 		}
 
-		if err := UnmarshalValue(r, field, opts); err != nil {
+		if err := UnmarshalValue(mixedRadix, field, opts); err != nil {
 			// Wrap the error with field context if not already wrapped
 			var e *asn1.Error
 			if errors.As(err, &e) && e.Field == "" {
@@ -232,7 +210,7 @@ func unmarshalStruct(r *asn1.BitReader, v reflect.Value) error {
 
 // unmarshalChoice decodes a CHOICE type.
 // The choice index is decoded first, followed by the chosen value.
-func unmarshalChoice(r *asn1.BitReader, v reflect.Value) error {
+func unmarshalChoice(mixedRadix *big.Int, v reflect.Value) error {
 	t := v.Type()
 
 	// Build a list of choice alternatives
@@ -284,20 +262,14 @@ func unmarshalChoice(r *asn1.BitReader, v reflect.Value) error {
 
 	// Read the choice index
 	numAlternatives := len(alternatives)
-	numBits := bitsNeeded(uint64(numAlternatives - 1))
-	choiceIdx, err := r.ReadBits(numBits)
-	if err != nil {
-		return &asn1.Error{
-			Op:     "unmarshal",
-			Type:   t.Name(),
-			Reason: fmt.Sprintf("failed to read choice index: %v", err),
-		}
-	}
+	base := big.NewInt(int64(numAlternatives))
+	choiceIdx := new(big.Int)
+	_, choiceIdx = mixedRadix.DivMod(mixedRadix, base, choiceIdx)
 
 	// Find the alternative with the matching choice index
 	var selectedAlt *choiceAlt
 	for i := range alternatives {
-		if alternatives[i].choiceIndex == int(choiceIdx) {
+		if alternatives[i].choiceIndex == int(choiceIdx.Int64()) {
 			selectedAlt = &alternatives[i]
 			break
 		}
@@ -325,7 +297,7 @@ func unmarshalChoice(r *asn1.BitReader, v reflect.Value) error {
 		target = target.Elem()
 	}
 
-	if err := UnmarshalValue(r, target, selectedAlt.opts); err != nil {
+	if err := UnmarshalValue(mixedRadix, target, selectedAlt.opts); err != nil {
 		sf := t.Field(selectedAlt.fieldIndex)
 		var e *asn1.Error
 		if errors.As(err, &e) && e.Field == "" {
@@ -338,7 +310,7 @@ func unmarshalChoice(r *asn1.BitReader, v reflect.Value) error {
 }
 
 // unmarshalOctetString decodes a byte slice as an ASN.1 OCTET STRING.
-func unmarshalOctetString(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) error {
+func unmarshalOctetString(mixedRadix *big.Int, v reflect.Value, opts asn1.FieldOptions) error {
 	if opts.SizeMin == nil || opts.SizeMax == nil {
 		return &asn1.Error{
 			Op:     "unmarshal",
@@ -358,38 +330,25 @@ func unmarshalOctetString(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOpt
 	} else {
 		// Variable size - read the length offset first
 		rangeSize := upperBound - lowerBound + 1
-		numBits := bitsNeeded(uint64(rangeSize - 1))
-		offset, err := r.ReadBits(numBits)
-		if err != nil {
-			return &asn1.Error{
-				Op:     "unmarshal",
-				Type:   "[]byte",
-				Reason: fmt.Sprintf("failed to read length: %v", err),
-			}
-		}
-		length = int64(offset) + lowerBound
+		offset := new(big.Int)
+		_, offset = mixedRadix.DivMod(mixedRadix, big.NewInt(rangeSize), offset)
+		length = offset.Int64() + lowerBound
 	}
 
 	// Read the data bytes
 	data := make([]byte, length)
+	base := big.NewInt(256)
 	for i := int64(0); i < length; i++ {
-		b, err := r.ReadBits(8)
-		if err != nil {
-			return &asn1.Error{
-				Op:     "unmarshal",
-				Type:   "[]byte",
-				Reason: fmt.Sprintf("failed to read byte %d: %v", i, err),
-			}
-		}
-		data[i] = byte(b)
+		b := new(big.Int)
+		_, b = mixedRadix.DivMod(mixedRadix, base, b)
+		data[i] = byte(b.Uint64())
 	}
 
 	v.SetBytes(data)
 	return nil
 }
 
-// unmarshalString decodes a string using UPER encoding.
-func unmarshalString(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) error {
+func unmarshalString(mixedRadix *big.Int, v reflect.Value, opts asn1.FieldOptions) error {
 	if opts.SizeMin == nil || opts.SizeMax == nil {
 		return &asn1.Error{
 			Op:     "unmarshal",
@@ -408,36 +367,24 @@ func unmarshalString(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions)
 		length = lowerBound
 	} else {
 		// Variable size - read the length offset first
-		rangeSize := upperBound - lowerBound + 1
-		numBits := bitsNeeded(uint64(rangeSize - 1))
-		offset, err := r.ReadBits(numBits)
-		if err != nil {
-			return &asn1.Error{
-				Op:     "unmarshal",
-				Type:   "string",
-				Reason: fmt.Sprintf("failed to read length: %v", err),
-			}
-		}
-		length = int64(offset) + lowerBound
+		rangeSize := big.NewInt(upperBound - lowerBound + 1)
+		offset := new(big.Int)
+		_, offset = mixedRadix.DivMod(mixedRadix, rangeSize, offset)
+		length = offset.Int64() + lowerBound
 	}
 
 	// Decode the characters based on the string type
 	var s string
-	var err error
 
 	switch opts.StringType {
 	case asn1.StringTypeIA5:
-		s, err = unmarshalIA5String(r, int(length))
+		s = unmarshalIA5String(mixedRadix, int(length))
 	case asn1.StringTypeVisible:
-		s, err = unmarshalVisibleString(r, int(length))
+		s = unmarshalVisibleString(mixedRadix, int(length))
 	case asn1.StringTypePrintable:
-		s, err = unmarshalPrintableString(r, int(length))
+		s = unmarshalPrintableString(mixedRadix, int(length))
 	default: // UTF8 is the default
-		s, err = unmarshalUTF8String(r, int(length))
-	}
-
-	if err != nil {
-		return err
+		s = unmarshalUTF8String(mixedRadix, int(length))
 	}
 
 	v.SetString(s)
@@ -445,75 +392,53 @@ func unmarshalString(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions)
 }
 
 // unmarshalIA5String decodes an IA5String (7 bits per character).
-func unmarshalIA5String(r *asn1.BitReader, length int) (string, error) {
+func unmarshalIA5String(mixedRadix *big.Int, length int) string {
 	chars := make([]byte, length)
-	for i := 0; i < length; i++ {
-		c, err := r.ReadBits(7)
-		if err != nil {
-			return "", &asn1.Error{
-				Op:     "unmarshal",
-				Type:   "string",
-				Reason: fmt.Sprintf("failed to read IA5 character %d: %v", i, err),
-			}
-		}
-		chars[i] = byte(c)
+	for i := range length {
+		base := big.NewInt(128)
+		c := new(big.Int)
+		_, c = mixedRadix.DivMod(mixedRadix, base, c)
+		chars[i] = byte(c.Uint64())
 	}
-	return string(chars), nil
+	return string(chars)
 }
 
 // unmarshalVisibleString decodes a VisibleString (7 bits per character).
-func unmarshalVisibleString(r *asn1.BitReader, length int) (string, error) {
+func unmarshalVisibleString(mixedRadix *big.Int, length int) string {
 	chars := make([]byte, length)
-	for i := 0; i < length; i++ {
-		c, err := r.ReadBits(7)
-		if err != nil {
-			return "", &asn1.Error{
-				Op:     "unmarshal",
-				Type:   "string",
-				Reason: fmt.Sprintf("failed to read VisibleString character %d: %v", i, err),
-			}
-		}
-		chars[i] = byte(c)
+	for i := range length {
+		c := new(big.Int)
+		_, c = mixedRadix.DivMod(mixedRadix, visibleCharCount, c)
+		chars[i] = byte(c.Uint64() + 32)
 	}
-	return string(chars), nil
+	return string(chars)
 }
 
 // unmarshalPrintableString decodes a PrintableString (7 bits per character).
-func unmarshalPrintableString(r *asn1.BitReader, length int) (string, error) {
+func unmarshalPrintableString(mixedRadix *big.Int, length int) string {
+	fillReversePrintableMap()
 	chars := make([]byte, length)
-	for i := 0; i < length; i++ {
-		c, err := r.ReadBits(7)
-		if err != nil {
-			return "", &asn1.Error{
-				Op:     "unmarshal",
-				Type:   "string",
-				Reason: fmt.Sprintf("failed to read PrintableString character %d: %v", i, err),
-			}
-		}
-		chars[i] = byte(c)
+	for i := range length {
+		c := new(big.Int)
+		_, c = mixedRadix.DivMod(mixedRadix, big.NewInt(int64(len(offsetToPrintable))), c)
+		chars[i] = byte(offsetToPrintable[c.Int64()])
 	}
-	return string(chars), nil
+	return string(chars)
 }
 
 // unmarshalUTF8String decodes a UTF8String (8 bits per byte).
-func unmarshalUTF8String(r *asn1.BitReader, length int) (string, error) {
+func unmarshalUTF8String(mixedRadix *big.Int, length int) string {
 	bytes := make([]byte, length)
-	for i := 0; i < length; i++ {
-		b, err := r.ReadBits(8)
-		if err != nil {
-			return "", &asn1.Error{
-				Op:     "unmarshal",
-				Type:   "string",
-				Reason: fmt.Sprintf("failed to read UTF8 byte %d: %v", i, err),
-			}
-		}
-		bytes[i] = byte(b)
+	for i := range length {
+		b := new(big.Int)
+		_, b = mixedRadix.DivMod(mixedRadix, big.NewInt(256), b)
+		bytes[i] = byte(b.Uint64())
 	}
-	return string(bytes), nil
+	return string(bytes)
 }
 
 // unmarshalSequenceOf decodes a slice as an ASN.1 SEQUENCE OF.
-func unmarshalSequenceOf(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions) error {
+func unmarshalSequenceOf(mixedRadix *big.Int, v reflect.Value, opts asn1.FieldOptions) error {
 	if opts.SizeMin == nil || opts.SizeMax == nil {
 		return &asn1.Error{
 			Op:     "unmarshal",
@@ -532,17 +457,10 @@ func unmarshalSequenceOf(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOpti
 		length = lowerBound
 	} else {
 		// Variable size - read the length offset first
-		rangeSize := upperBound - lowerBound + 1
-		numBits := bitsNeeded(uint64(rangeSize - 1))
-		offset, err := r.ReadBits(numBits)
-		if err != nil {
-			return &asn1.Error{
-				Op:     "unmarshal",
-				Type:   v.Type().String(),
-				Reason: fmt.Sprintf("failed to read length: %v", err),
-			}
-		}
-		length = int64(offset) + lowerBound
+		rangeSize := big.NewInt(upperBound - lowerBound + 1)
+		offset := new(big.Int)
+		_, offset = mixedRadix.DivMod(mixedRadix, rangeSize, offset)
+		length = offset.Int64() + lowerBound
 	}
 
 	// Create the slice
@@ -554,7 +472,7 @@ func unmarshalSequenceOf(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOpti
 		elem := slice.Index(int(i))
 		// Pass empty options for elements - they should have their own constraints
 		// defined by the element type's struct tags
-		if err := UnmarshalValue(r, elem, asn1.FieldOptions{}); err != nil {
+		if err := UnmarshalValue(mixedRadix, elem, asn1.FieldOptions{}); err != nil {
 			return &asn1.Error{
 				Op:     "unmarshal",
 				Type:   elemType.String(),
