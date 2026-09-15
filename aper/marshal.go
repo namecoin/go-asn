@@ -21,15 +21,15 @@ func Marshal(v interface{}) ([]byte, error) {
 	}
 
 	w := asn1.NewBitWriter(true) // APER is aligned
-	if err := marshalValue(w, rv, asn1.FieldOptions{}); err != nil {
+	if err := MarshalValue(w, rv, asn1.FieldOptions{}); err != nil {
 		return nil, err
 	}
 
 	return w.Bytes(), nil
 }
 
-// marshalValue encodes a single value based on its type.
-func marshalValue(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOptions) error {
+// MarshalValue encodes a single value based on its type.
+func MarshalValue(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOptions) error {
 	// Handle pointers - dereference to get the underlying value.
 	if v.Kind() == reflect.Ptr {
 		if v.IsNil() {
@@ -148,7 +148,7 @@ func marshalStruct(w *asn1.BitWriter, v reflect.Value) error {
 			continue
 		}
 
-		if err := marshalValue(w, field, opts); err != nil {
+		if err := MarshalValue(w, field, opts); err != nil {
 			var e *asn1.Error
 			if errors.As(err, &e) && e.Field == "" {
 				e.Field = structField.Name
@@ -277,7 +277,7 @@ func marshalChoice(w *asn1.BitWriter, v reflect.Value) error {
 		field = field.Elem()
 	}
 
-	if err := marshalValue(w, field, opts); err != nil {
+	if err := MarshalValue(w, field, opts); err != nil {
 		var e *asn1.Error
 		if errors.As(err, &e) && e.Field == "" {
 			e.Field = sf.Name
@@ -419,7 +419,7 @@ func marshalSequenceOf(w *asn1.BitWriter, v reflect.Value, opts asn1.FieldOption
 	// Encode each element
 	for i := 0; i < v.Len(); i++ {
 		elem := v.Index(i)
-		if err := marshalValue(w, elem, asn1.FieldOptions{}); err != nil {
+		if err := MarshalValue(w, elem, asn1.FieldOptions{}); err != nil {
 			return &asn1.Error{
 				Op:     "marshal",
 				Type:   v.Type().String(),
