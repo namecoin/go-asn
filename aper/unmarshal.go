@@ -415,14 +415,14 @@ func unmarshalString(r *asn1.BitReader, v reflect.Value, opts asn1.FieldOptions)
 	var err error
 
 	switch opts.StringType {
-	case asn1.StringTypeIA5:
-		s, err = unmarshalIA5String(r, int(length))
 	case asn1.StringTypeVisible:
 		s, err = unmarshalVisibleString(r, int(length))
 	case asn1.StringTypePrintable:
 		s, err = unmarshalPrintableString(r, int(length))
-	default:
+	case asn1.StringTypeUTF8:
 		s, err = unmarshalUTF8String(r, int(length))
+	default:
+		s, err = unmarshalIA5String(r, int(length))
 	}
 
 	if err != nil {

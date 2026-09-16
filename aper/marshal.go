@@ -476,14 +476,14 @@ func marshalString(w *asn1.BitWriter, s string, opts asn1.FieldOptions) error {
 
 	// Encode the characters based on the string type
 	switch opts.StringType {
-	case asn1.StringTypeIA5:
-		return marshalIA5String(w, s)
 	case asn1.StringTypeVisible:
 		return marshalVisibleString(w, s)
 	case asn1.StringTypePrintable:
 		return marshalPrintableString(w, s)
-	default:
+	case asn1.StringTypeUTF8:
 		return marshalUTF8String(w, s)
+	default:
+		return marshalIA5String(w, s)
 	}
 }
 
