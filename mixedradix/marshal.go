@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"reflect"
+	"slices"
 
 	"github.com/namecoin/go-asn/asn1"
 )
@@ -517,10 +518,154 @@ func marshalString(mixedRadixCtx *asn1.MixedRadixNumber, s string, opts asn1.Fie
 		return marshalVisibleString(mixedRadixCtx, s)
 	case asn1.StringTypePrintable:
 		return marshalPrintableString(mixedRadixCtx, s)
+	case asn1.StringTypeDnsName:
+		return marshalDnsName(mixedRadixCtx, s)
+	case asn1.StringTypeChainName:
+		return marshalChainName(mixedRadixCtx, s)
+	case asn1.StringTypeDnsMatcher:
+		return marshalDnsMatcher(mixedRadixCtx, s)
 	default: // UTF8 is the default
 		marshalUTF8String(mixedRadixCtx, s)
 		return nil
 	}
+}
+
+var dnsNameChars []rune
+var chainNameChars []rune
+var dnsMatcherChars []rune
+
+func fillDnsNameChars() {
+	if dnsNameChars != nil {
+		return
+	}
+
+	// a-z
+	for i := 97; i < 123; i++ {
+		dnsNameChars = append(dnsNameChars, rune(i))
+	}
+
+	// 0-9
+	for i := 48; i < 58; i++ {
+		dnsNameChars = append(dnsNameChars, rune(i))
+	}
+
+	dnsNameChars = append(dnsNameChars, '-')
+
+	chainNameChars = slices.Concat(dnsNameChars, []rune{'/'})
+	dnsNameChars = append(dnsNameChars, '.', '_')
+
+	dnsMatcherChars = append(dnsNameChars, '*')
+}
+
+func IsValidDnsName(s string) bool {
+	fillDnsNameChars()
+	for _, c := range s {
+		if !slices.Contains(dnsNameChars, c) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func IsValidDnsMatcher(s string) bool {
+	fillDnsNameChars()
+	for _, c := range s {
+		if !slices.Contains(dnsMatcherChars, c) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func IsValidChainName(s string) bool {
+	fillDnsNameChars()
+	for _, c := range s {
+		if !slices.Contains(chainNameChars, c) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func marshalDnsName(mixedRadixCtx *asn1.MixedRadixNumber, s string) error {
+	fillDnsNameChars()
+	for i, c := range s {
+		mapped := -1
+		for j, x := range dnsNameChars {
+			if c == x {
+				mapped = j
+				break
+			}
+		}
+
+		if mapped == -1 {
+			return &asn1.Error{
+				Op:     "marshal",
+				Type:   "string",
+				Reason: fmt.Sprintf("character at position %d (0x%X) is not valid in a dns name", i, c),
+			}
+		}
+		mul := new(big.Int).Mul(big.NewInt(int64(mapped)), mixedRadixCtx.Base)
+		mixedRadixCtx.Value.Add(mixedRadixCtx.Value, mul)
+		mixedRadixCtx.Base.Mul(mixedRadixCtx.Base, big.NewInt(int64(len(dnsNameChars))))
+	}
+
+	return nil
+}
+
+func marshalDnsMatcher(mixedRadixCtx *asn1.MixedRadixNumber, s string) error {
+	fillDnsNameChars()
+	for i, c := range s {
+		mapped := -1
+		for j, x := range dnsMatcherChars {
+			if c == x {
+				mapped = j
+				break
+			}
+		}
+
+		if mapped == -1 {
+			return &asn1.Error{
+				Op:     "marshal",
+				Type:   "string",
+				Reason: fmt.Sprintf("character at position %d (0x%X) is not valid in a dns matcher", i, c),
+			}
+		}
+		mul := new(big.Int).Mul(big.NewInt(int64(mapped)), mixedRadixCtx.Base)
+		mixedRadixCtx.Value.Add(mixedRadixCtx.Value, mul)
+		mixedRadixCtx.Base.Mul(mixedRadixCtx.Base, big.NewInt(int64(len(dnsMatcherChars))))
+	}
+
+	return nil
+}
+
+func marshalChainName(mixedRadixCtx *asn1.MixedRadixNumber, s string) error {
+	fillDnsNameChars()
+	for i, c := range s {
+		mapped := -1
+		for j, x := range chainNameChars {
+			if c == x {
+				mapped = j
+				break
+			}
+		}
+
+		if mapped == -1 {
+			return &asn1.Error{
+				Op:     "marshal",
+				Type:   "string",
+				Reason: fmt.Sprintf("character at position %d (0x%X) is not valid in a chain name", i, c),
+			}
+		}
+		mul := new(big.Int).Mul(big.NewInt(int64(mapped)), mixedRadixCtx.Base)
+		mixedRadixCtx.Value.Add(mixedRadixCtx.Value, mul)
+		mixedRadixCtx.Base.Mul(mixedRadixCtx.Base, big.NewInt(int64(len(chainNameChars))))
+	}
+
+	return nil
 }
 
 // marshalIA5String encodes a string as IA5String (7 bits per character).

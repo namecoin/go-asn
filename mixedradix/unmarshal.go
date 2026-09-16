@@ -383,12 +383,54 @@ func unmarshalString(mixedRadix *big.Int, v reflect.Value, opts asn1.FieldOption
 		s = unmarshalVisibleString(mixedRadix, int(length))
 	case asn1.StringTypePrintable:
 		s = unmarshalPrintableString(mixedRadix, int(length))
+	case asn1.StringTypeDnsName:
+		s = unmarshalDnsName(mixedRadix, int(length))
+	case asn1.StringTypeChainName:
+		s = unmarshalChainName(mixedRadix, int(length))
+	case asn1.StringTypeDnsMatcher:
+		s = unmarshalDnsMatcher(mixedRadix, int(length))
 	default: // UTF8 is the default
 		s = unmarshalUTF8String(mixedRadix, int(length))
 	}
 
 	v.SetString(s)
 	return nil
+}
+
+func unmarshalDnsName(mixedRadix *big.Int, length int) string {
+	chars := make([]rune, length)
+	for i := range length {
+		base := big.NewInt(int64(len(dnsNameChars)))
+		c := new(big.Int)
+		_, c = mixedRadix.DivMod(mixedRadix, base, c)
+		chars[i] = dnsNameChars[c.Uint64()]
+	}
+
+	return string(chars)
+}
+
+func unmarshalDnsMatcher(mixedRadix *big.Int, length int) string {
+	chars := make([]rune, length)
+	for i := range length {
+		base := big.NewInt(int64(len(dnsMatcherChars)))
+		c := new(big.Int)
+		_, c = mixedRadix.DivMod(mixedRadix, base, c)
+		chars[i] = dnsMatcherChars[c.Uint64()]
+	}
+
+	return string(chars)
+}
+
+func unmarshalChainName(mixedRadix *big.Int, length int) string {
+	chars := make([]rune, length)
+	for i := range length {
+		base := big.NewInt(int64(len(chainNameChars)))
+		c := new(big.Int)
+		_, c = mixedRadix.DivMod(mixedRadix, base, c)
+		chars[i] = chainNameChars[c.Uint64()]
+	}
+
+	return string(chars)
 }
 
 // unmarshalIA5String decodes an IA5String (7 bits per character).

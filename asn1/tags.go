@@ -18,6 +18,10 @@ const (
 	StringTypePrintable
 	// StringTypeVisible represents VisibleString.
 	StringTypeVisible
+	// Namecoin custom
+	StringTypeDnsName
+	StringTypeChainName
+	StringTypeDnsMatcher
 )
 
 // FieldOptions holds the parsed options from an asn1 struct tag.
@@ -109,6 +113,12 @@ func ParseTag(tag string) (FieldOptions, error) {
 			opts.StringType = StringTypePrintable
 		case "visiblestring":
 			opts.StringType = StringTypeVisible
+		case "dnsname":
+			opts.StringType = StringTypeDnsName
+		case "chainname":
+			opts.StringType = StringTypeChainName
+		case "dnsmatcher":
+			opts.StringType = StringTypeDnsMatcher
 		default:
 			return opts, fmt.Errorf("unknown tag option %q", part)
 		}
